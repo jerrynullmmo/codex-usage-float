@@ -10,3 +10,10 @@
 *.sqlite-*
 settings.json
 *.log
+
+# Windows build/runtime artifacts
+.venv/
+__pycache__/
+*.pyc
+windows/FocusProbe.exe
+*.spec

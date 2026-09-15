@@ -18,7 +18,10 @@ zsh build.sh
 | 文件 | 职责 |
 | --- | --- |
 | `Sources/UsageCore.swift` | 只读任务索引、增量解析用量、计算各项指标、保存显示偏好 |
-| `Sources/ActiveConversation.swift` | 读取前台 Codex 页面标题，匹配唯一的本地任务 |
+| `Sources/FamilyUsage.swift` | 按主任务时间边界汇总 Codex 后代，保留明细和缺失状态 |
+| `Sources/OpenCodeUsage.swift` | 只读 OpenCode 任务/消息计量，归一化缓存与推理口径 |
+| `Sources/UsageSources.swift` | 内置来源选择与本地 JSON 接入；校验当前任务及新鲜度 |
+| `Sources/ActiveConversation.swift` | 按应用选择当前任务识别方式；无法确认时清空 |
 | `Sources/FloatingUI.swift` | 不抢焦点的浮窗、悬停交互、菜单、异步状态更新 |
 | `Sources/main.swift` | 应用入口与按需诊断命令 |
 | `Tests/main.swift` | 用合成数据验证计量、轮次与标题匹配边界 |
@@ -34,3 +37,7 @@ zsh build.sh
 - 涉及自动跟随的改动应测试任务 A → B → A、同名任务、未识别页面、权限缺失和任务切换时的异步结果。
 
 提交内容使用仓库的 MIT 许可证。不要提交你无权公开的代码或素材。
+
+新增软件请先读 [接入说明](docs/ADAPTERS.md)。每个接入必须分别说明计量读取、子代理完整性和真实切换验收；合成测试不能代替软件实测。
+
+Windows 客户端位于 `windows/`。用 `python3 -m unittest discover -s windows -p test_usage.py` 运行不依赖真实账号的计量测试；在 Windows 运行 `windows/build.ps1` 构建独立程序。跨语言计量实现必须遵守同一字段口径，修改算法时同时更新对应测试；界面检查须区分程序化检查和真实软件切换。

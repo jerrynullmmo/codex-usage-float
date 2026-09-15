@@ -4,14 +4,17 @@ let args = CommandLine.arguments
 func argument(_ flag: String) -> String? {
     guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }; return args[i + 1]
 }
-if args.contains("--focus-probe") {
+if let path = argument("--bridge-check") {
+    guard let doc = UsageBridge.read(URL(fileURLWithPath: path)) else { fputs("接入文件无效\n", stderr); exit(1) }
+    print("有效接入：\(doc.id)，\(doc.sessions.count) 个任务，当前任务状态\(doc.isActiveFresh ? "新鲜" : "已过期")")
+} else if args.contains("--focus-probe") {
     let report = ActiveConversation.probe()
     let data = try! JSONEncoder().encode(report)
     print(String(decoding: data, as: UTF8.self))
     if let path = argument("--diagnostic-output") { try? data.write(to: URL(fileURLWithPath: path), options: .atomic) }
 } else if let thread = argument("--snapshot") {
-    if let entry = ThreadStore().read(id: thread).first {
-        let snapshot = UsageReader(path: entry.path).poll()
+    if let entry = UsageSources().read(id: thread, source: argument("--source") ?? "codex") {
+        let snapshot = UsageSources().reader(for: entry, includeChildren: !args.contains("--root-only")).poll()
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let bytes = try? encoder.encode(snapshot) { print(String(decoding: bytes, as: UTF8.self)) }
     } else { fputs("本地任务不存在\n", stderr); exit(1) }

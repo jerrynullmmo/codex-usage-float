@@ -77,4 +77,106 @@ sqlite3_close(db)
 let oldSettings = Data("{\"onlyCodex\":false,\"metrics\":[\"output\"],\"compact\":\"totalOutput\",\"accent\":\"rose\",\"x\":120,\"y\":150}".utf8)
 let migrated = try! JSONDecoder().decode(Settings.self, from: oldSettings)
 check((migrated.autoFollow ?? true) && !migrated.onlyCodex && migrated.x == 120 && migrated.metrics == [.output], "auto-follow defaults on while preserving old preferences")
+
+
+// Root-window accounting across descendants, including grandchildren, duplicates and cycles.
+func at(_ time: String, _ bytes: Data) -> Data {
+    Data(String(decoding: bytes, as: UTF8.self).replacingOccurrences(of: "2026-09-15T00:00:00.000Z", with: time).utf8)
+}
+let before = "2026-09-14T23:00:00.000Z"
+let after = "2026-09-15T01:00:00.000Z"
+let rootLog = directory.appendingPathComponent("root.jsonl")
+let childLog = directory.appendingPathComponent("child.jsonl")
+let grandLog = directory.appendingPathComponent("grand.jsonl")
+try (at(before, event("task_started") + count(100, 10)) + event("task_started") + at(after, count(400, 40))).write(to: rootLog)
+try (at(before, event("task_started") + count(200, 20)) + event("task_started") + at(after, count(350, 35) + event("task_complete") + event("task_started") + count(500, 50) + count(500, 50))).write(to: childLog)
+try (at(after, event("task_started") + count(50, 5))).write(to: grandLog)
+check(sqlite3_open(directory.appendingPathComponent("state_5.sqlite").path, &db) == SQLITE_OK, "open family fixture index")
+sqlite3_exec(db, "CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT);", nil, nil, nil)
+func insertThread(_ id: String, _ path: String) {
+    sqlite3_exec(db, "INSERT INTO threads VALUES ('\(id)','\(id)','\(id)','\(path)');", nil, nil, nil)
+}
+insertThread("root", rootLog.path); insertThread("child", childLog.path); insertThread("grand", grandLog.path)
+sqlite3_exec(db, "INSERT INTO thread_spawn_edges VALUES ('root','child','closed'),('child','grand','open'),('grand','child','open');", nil, nil, nil)
+let familyRoot = ThreadEntry(id: "root", title: "root", path: rootLog.path)
+let family = CodexFamilyReader(root: familyRoot, store: store)
+var familySnapshot = family.poll()
+check(familySnapshot.total?.input == 950 && familySnapshot.members.count == 3, "sum own counters once across closed child and cyclic grandchild relation")
+check(familySnapshot.round?.input == 650, "all child followups use root turn boundary, not child last-turn baseline")
+check(familySnapshot.last?.input == 400, "aggregate leaves root last call separate")
+check(CodexFamilyReader(root: familyRoot, store: store, includeChildren: false).poll().total?.input == 400, "root-only option excludes child counters")
+sqlite3_exec(db, "INSERT INTO thread_spawn_edges VALUES ('root','missing','open');", nil, nil, nil)
+familySnapshot = family.poll()
+check(familySnapshot.total?.input == nil && familySnapshot.error != nil && familySnapshot.members.count == 4, "missing descendant makes full sum unknown with visible coverage")
+sqlite3_exec(db, "DELETE FROM thread_spawn_edges WHERE child_thread_id='missing';", nil, nil, nil)
+try FileManager.default.removeItem(at: rootLog)
+familySnapshot = family.poll()
+check(familySnapshot.total?.input == nil && familySnapshot.round == nil && familySnapshot.error != nil, "unreadable root cannot mix stale parent with fresh child usage")
+sqlite3_close(db)
+check(Tokens(input: Int64.max).adding(Tokens(input: 1)).input == nil, "overflow is unknown instead of crashing")
+
+// OpenCode uses disjoint cache/reasoning counters, so normalization must happen before summing.
+let normalized = OpenCodeReader.tokens(["input": 3860, "output": 77, "reasoning": 17, "cache": ["read": 8192, "write": 0]])
+check(normalized.input == 12052 && normalized.output == 94 && normalized.cached == 8192, "OpenCode inclusive normalization matches total 12146")
+let ocPath = directory.appendingPathComponent("opencode.db").path
+sqlite3_open(ocPath, &db)
+sqlite3_exec(db, "CREATE TABLE session(id TEXT,title TEXT,parent_id TEXT,time_archived INTEGER,time_updated INTEGER); CREATE TABLE message(id TEXT,session_id TEXT,time_created INTEGER,data TEXT); INSERT INTO session VALUES('oroot','Open root',NULL,NULL,1),('och','Open child','oroot',1,1);", nil, nil, nil)
+func ocMessage(_ id: String, _ session: String, _ time: Int, _ role: String, parent: String? = nil, tokens: [String: Any]? = nil) {
+    var d: [String: Any] = ["role":role,"time":["created":time,"completed":time + 1]]
+    d["parentID"] = parent; d["tokens"] = tokens
+    let json = String(decoding: try! JSONSerialization.data(withJSONObject: d), as: UTF8.self)
+    var stmt: OpaquePointer?; sqlite3_prepare_v2(db, "INSERT INTO message VALUES (?,?,?,?)", -1, &stmt, nil)
+    for (i,v) in [id,session,String(time),json].enumerated() { _ = v.withCString { sqlite3_bind_text(stmt,Int32(i+1),$0,-1,unsafeBitCast(-1,to:sqlite3_destructor_type.self)) } }
+    sqlite3_step(stmt); sqlite3_finalize(stmt)
+}
+let ot: [String:Any] = ["input":100,"output":10,"reasoning":5,"cache":["read":20,"write":30]]
+ocMessage("u0","oroot",100,"user"); ocMessage("a0","oroot",110,"assistant",parent:"u0",tokens:ot)
+ocMessage("c0","och",120,"assistant",tokens:ot)
+ocMessage("u1","oroot",200,"user"); ocMessage("a1","oroot",210,"assistant",parent:"u1",tokens:ot)
+ocMessage("c1","och",220,"assistant",tokens:ot)
+sqlite3_close(db)
+let os = OpenCodeReader(root: ThreadEntry(id:"oroot",title:"Open root",path:ocPath,source:"opencode")).poll()
+check(os.total?.input == 600 && os.total?.output == 60, "OpenCode aggregates root plus archived child")
+check(os.round?.input == 300 && os.last?.input == 150 && os.members.count == 2, "OpenCode root user message sets shared round boundary")
+sqlite3_open(ocPath, &db)
+sqlite3_exec(db, "UPDATE message SET data=json_remove(data,'$.time.created') WHERE id='c1';", nil, nil, nil)
+var missingOC = OpenCodeReader(root: ThreadEntry(id:"oroot",title:"Open root",path:ocPath,source:"opencode")).poll()
+check(missingOC.round?.input == nil && missingOC.total?.input == 600, "missing child timestamp keeps OpenCode round unknown while preserving total")
+sqlite3_exec(db, "UPDATE message SET data=json_remove(data,'$.parentID') WHERE id='a1';", nil, nil, nil)
+missingOC = OpenCodeReader(root: ThreadEntry(id:"oroot",title:"Open root",path:ocPath,source:"opencode"),includeChildren:false).poll()
+check(missingOC.round?.input == nil && missingOC.last == nil, "missing root message parent cannot invent a zero round")
+sqlite3_close(db)
+check(OpenCodeStore(path:ocPath).read(exactTitle:"Open root").first?.id == "oroot", "OpenCode exact unique title selection")
+
+// A generic local bridge must select by explicit active ID and reject stale or malformed data.
+let bridgeDir = directory.appendingPathComponent("adapters")
+try FileManager.default.createDirectory(at: bridgeDir, withIntermediateDirectories:true)
+let bridgeURL = bridgeDir.appendingPathComponent("example.json")
+let nowISO = ISO8601DateFormatter().string(from:Date())
+var bridge = UsageBridge(schemaVersion:1,id:"example",name:"Example Desktop",bundleIDs:["org.example.desktop"],updatedAt:nowISO,activeSessionID:"br",sessions:[
+    BridgeSession(id:"br",title:"Example root",total:Tokens(input:100,output:10),last:Tokens(input:5),round:Tokens(input:30),roundStartedAt:nowISO),
+    BridgeSession(id:"bc",title:"Example child",parentID:"br",total:Tokens(input:50,output:5),round:Tokens(input:20),roundStartedAt:nowISO)
+])
+bridge.childrenComplete = true
+func saveBridge() { try! JSONEncoder().encode(bridge).write(to:bridgeURL,options:.atomic) }
+saveBridge()
+let catalog = UsageSources(bridgeDirectory:bridgeDir)
+let bf = catalog.bridgeFocus(bundle:"org.example.desktop")!
+check(bf.thread?.id == "br" && bf.status == "bridge", "new software follows explicit active session without changing monitor code")
+let bs = BridgeReader(entry:bf.thread!,includeChildren:true).poll()
+check(bs.total?.input == 150 && bs.round?.input == 50 && bs.last?.input == 5, "bridge sums own task counters and shared-boundary round")
+bridge.childrenComplete = false; saveBridge()
+check(BridgeReader(entry:bf.thread!,includeChildren:true).poll().total == nil, "bridge requires child completeness before presenting full sum")
+bridge.childrenComplete = true; bridge.activeSessionID = "bc"; saveBridge()
+check(catalog.bridgeFocus(bundle:"org.example.desktop")?.thread?.id == "bc", "bridge follows conversation change")
+bridge.sessions[1].roundStartedAt = before; saveBridge()
+check(BridgeReader(entry:bf.thread!,includeChildren:true).poll().round?.input == nil, "bridge rejects incomparable child round boundary")
+bridge.updatedAt = before; saveBridge()
+check(catalog.bridgeFocus(bundle:"org.example.desktop")?.thread == nil, "stopped bridge cannot retain stale active task")
+bridge.updatedAt = nowISO; bridge.sessions[0].total?.input = -1; saveBridge()
+check(UsageBridge.read(bridgeURL) == nil, "negative bridge counters reject snapshot")
+bridge.sessions[0].total?.input = 100; bridge.sessions.append(bridge.sessions[0]); saveBridge()
+check(UsageBridge.read(bridgeURL) == nil, "duplicate bridge task IDs reject snapshot")
+bridge.sessions.removeLast(); bridge.bundleIDs = []; bridge.processNames = ["ExampleDesktop.exe"]; saveBridge()
+check(UsageBridge.read(bridgeURL) != nil, "Windows-only bridge uses same schema with empty macOS bundle list")
 print("\(passed) accounting checks passed")

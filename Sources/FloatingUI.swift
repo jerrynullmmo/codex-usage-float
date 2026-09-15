@@ -78,7 +78,7 @@ final class MonitorView: NSView {
             text(owner.compactLabel, 27, 9, 107, size: 12, weight: .semibold, mono: true)
             return
         }
-        text("用量监控", 18, 17, 130, size: 15, weight: .semibold)
+        text(owner.snapshot.sourceName + " 用量", 18, 17, 130, size: 15, weight: .semibold)
         button(owner.pinned ? "已固定" : "固定", NSRect(x: 268, y: 12, width: 56, height: 28)) { [weak owner] in owner?.togglePin() }
         button("设置", NSRect(x: 332, y: 12, width: 56, height: 28)) { [weak owner, weak self] in
             guard let self else { return }; owner?.showMenu(at: NSPoint(x: 330, y: 42), in: self)
@@ -109,7 +109,7 @@ final class MonitorView: NSView {
         y += 4
         rect(NSRect(x: 18, y: y, width: 370, height: 1), NSColor.white.withAlphaComponent(0.08)); y += 14
         text("TOKEN", 18, y, 84, size: 10, color: muted, weight: .semibold)
-        for (label, x) in [("全任务", CGFloat(108)), ("本轮", CGFloat(204)), ("最近调用", CGFloat(298))] {
+        for (label, x) in [("任务合计", CGFloat(108)), ("本轮", CGFloat(204)), ("主任务最近", CGFloat(298))] {
             text(label, x, y, 90, size: 10, color: muted, align: .right)
         }
         y += 24
@@ -122,9 +122,9 @@ final class MonitorView: NSView {
             y += 29
         }
         y += 10
-        text("输入含缓存读取；输出含推理，勿重复相加。", 18, y, 371, size: 10, color: muted); y += 18
-        text("缓存写入为上报值；0 不代表已确认没有写入。", 18, y, 371, size: 10, color: muted); y += 18
-        text("仅所选本地任务记录，不汇总子代理或远程任务。", 18, y, 371, size: 10, color: muted); y += 25
+        text("输入含缓存；输出含推理，勿重复相加。", 18, y, 371, size: 10, color: muted); y += 18
+        text("— 表示未提供或不完整；0 为数据源上报值。", 18, y, 371, size: 10, color: muted); y += 18
+        text(owner.snapshot.scopeNote, 18, y, 371, size: 10, color: muted); y += 25
         rect(NSRect(x: 18, y: y, width: 370, height: 1), NSColor.white.withAlphaComponent(0.08)); y += 12
         let status = owner.snapshot.error ?? (owner.loading ? "正在读取记录…" : (owner.snapshot.running ? "任务执行中" : "等待下一轮"))
         text(status, 18, y, 220, size: 10, color: owner.snapshot.error == nil ? accent : .systemOrange)
@@ -151,7 +151,7 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastFocusCheck = Date.distantPast
     private var menuOpen = false
     private var hidden = false
-    private var reader: UsageReader?
+    private var reader: SnapshotReader?
     private let queue = DispatchQueue(label: "com.yonshore.codex-usage.reader", qos: .utility)
     private var reading = false
     private var selectionGeneration = 0
@@ -230,7 +230,7 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         reloadThreads()
         let wanted = initialThread ?? settings.threadID
         if uiTest { settings.autoFollow = false }
-        if !followsCurrent, let wanted, let entry = ThreadStore().read(id: wanted).first { select(entry) }
+        if !followsCurrent, let wanted, let entry = UsageSources().read(id: wanted, source: settings.sourceID ?? "codex") { select(entry) }
         else { selected = nil }
         hoverTimer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
         readTimer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
@@ -239,17 +239,17 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if uiTest { runUITest() }
     }
     func select(_ entry: ThreadEntry) {
-        selected = entry; settings.threadID = entry.id
+        selected = entry; settings.threadID = entry.id; settings.sourceID = entry.source
         if !uiTest { settings.save() }
-        selectionGeneration += 1; snapshot = UsageSnapshot(); reader = UsageReader(path: entry.path); loading = true
+        selectionGeneration += 1; snapshot = UsageSnapshot(); reader = UsageSources().reader(for: entry, includeChildren: settings.includeSubagents ?? true); loading = true
         refresh()
     }
-    private func reloadThreads() { recent = ThreadStore().read() }
+    private func reloadThreads() { recent = UsageSources().recent() }
     func applyFocus(_ report: FocusReport) {
         guard followsCurrent else { return }
         focusReport = report
         if let entry = report.thread {
-            if selected?.id != entry.id || selected?.path != entry.path { select(entry) }
+            if selected?.id != entry.id || selected?.path != entry.path || selected?.source != entry.source { select(entry) }
             else { selected = entry }
         } else {
             // Invalidate an in-flight read before clearing the UI; old callbacks cannot repopulate it.
@@ -261,13 +261,13 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refreshFocus() {
         guard followsCurrent, !uiTest, !checkingFocus, !menuOpen, Date().timeIntervalSince(lastFocusCheck) >= 0.5 else { return }
         lastFocusCheck = Date()
-        guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.openai.codex" else {
+        guard let app = NSWorkspace.shared.frontmostApplication, UsageSources().supports(bundle: app.bundleIdentifier ?? "") else {
             applyFocus(FocusReport(status: "background")); return
         }
         checkingFocus = true
         let pid = app.processIdentifier
         focusQueue.async { [weak self] in
-            let report = ActiveConversation.read(pid: pid)
+            let report = ActiveConversation.read(pid: pid, bundle: app.bundleIdentifier ?? "")
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }; self.checkingFocus = false
                 guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { self.applyFocus(FocusReport(status: "background")); return }
@@ -298,7 +298,7 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private func hostIsFrontmost() -> Bool {
         let identifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
-        return identifier == "com.openai.codex" || identifier == "com.openai.chat" || identifier == Bundle.main.bundleIdentifier
+        return UsageSources().supports(bundle: identifier) || identifier == Bundle.main.bundleIdentifier
     }
     private func tick() {
         refreshFocus()
@@ -379,7 +379,7 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         let explanation = NSMenuItem(title: "手动选择监控任务（仅本机）", action: nil, keyEquivalent: ""); menu.addItem(explanation)
         for entry in recent {
-            menu.addItem(item(String(entry.title.prefix(38)) + " · " + String(entry.id.suffix(6)), checked: selected?.id == entry.id) { [weak self] in self?.settings.autoFollow = false; self?.select(entry) })
+            menu.addItem(item("[" + entry.source + "] " + String(entry.title.prefix(30)) + " · " + String(entry.id.suffix(6)), checked: selected?.id == entry.id && selected?.source == entry.source) { [weak self] in self?.settings.autoFollow = false; self?.select(entry) })
         }
         return menu
     }
@@ -403,11 +403,31 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
             })
         }
-        menu.addItem(item("仅 Codex / ChatGPT 在前台时显示", checked: settings.onlyCodex, action: { [weak self] in
+        menu.addItem(item("仅已接入的软件在前台时显示", checked: settings.onlyCodex, action: { [weak self] in
             guard let self else { return }; self.settings.onlyCodex.toggle(); self.save()
         }))
         menu.addItem(.separator())
         let tasks = NSMenuItem(title: "选择监控任务", action: nil, keyEquivalent: ""); tasks.submenu = threadMenu(); menu.addItem(tasks)
+        menu.addItem(item("汇总全部子代理", checked: settings.includeSubagents ?? true) { [weak self] in
+            guard let self else { return }; self.settings.includeSubagents = !(self.settings.includeSubagents ?? true)
+            if let selected = self.selected { self.select(selected) }; self.save()
+        })
+        if !snapshot.members.isEmpty {
+            let members = NSMenuItem(title: "查看各任务用量", action: nil, keyEquivalent: ""); members.submenu = NSMenu()
+            for member in snapshot.members {
+                let row = NSMenuItem(title: String(member.title.prefix(32)) + " · " + String(member.id.suffix(6)), action: nil, keyEquivalent: "")
+                row.submenu = NSMenu()
+                for metric in Metric.allCases {
+                    row.submenu?.addItem(NSMenuItem(title: metric.label + "：" + metric.value(member.total) + " · 本轮 " + metric.value(member.round), action: nil, keyEquivalent: ""))
+                }
+                members.submenu?.addItem(row)
+            }
+            menu.addItem(members)
+        }
+        menu.addItem(item("打开软件接入目录") {
+            try? FileManager.default.createDirectory(at: UsageBridge.directory, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(UsageBridge.directory)
+        })
         let compact = NSMenuItem(title: "浮标显示内容", action: nil, keyEquivalent: ""); compact.submenu = NSMenu()
         for (key, label) in [("quota", "套餐剩余比例"), ("totalInput", "任务累计输入"), ("totalOutput", "任务累计输出"), ("roundInput", "本轮输入"), ("roundOutput", "本轮输出")] {
             compact.submenu?.addItem(item(label, checked: settings.compact == key) { [weak self] in self?.settings.compact = key; self?.save() })

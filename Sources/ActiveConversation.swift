@@ -7,11 +7,12 @@ struct FocusReport: Codable {
     var thread: ThreadEntry?
     var message: String {
         switch status {
+        case "bridge": return "自动跟随 · 接入程序提供任务编号"
         case "matched": return "自动跟随 · 标题唯一匹配"
         case "permission": return "需要辅助功能权限以读取对话标题"
         case "ambiguous": return "存在同名任务，无法确认当前对话"
         case "unmatched": return "未找到对应本地任务，可能是远程或新对话"
-        case "background": return "Codex 不在前台，等待返回"
+        case "background": return "支持的应用不在前台，等待返回"
         default: return "未识别到对话，暂不显示任务用量"
         }
     }
@@ -24,7 +25,10 @@ struct FocusReport: Codable {
 }
 
 enum ActiveConversation {
-    static func read(pid: pid_t, store: ThreadStore = ThreadStore()) -> FocusReport {
+    static func read(pid: pid_t, store: ThreadStore = ThreadStore(), bundle: String = "com.openai.codex") -> FocusReport {
+        if bundle != "com.openai.codex", bundle != "ai.opencode.desktop" {
+            return UsageSources().bridgeFocus(bundle: bundle) ?? FocusReport(status: "unavailable")
+        }
         guard AXIsProcessTrusted() else { return FocusReport(status: "permission") }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.15)
@@ -35,6 +39,13 @@ enum ActiveConversation {
         }
         guard let value = attribute(app, kAXFocusedWindowAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return FocusReport(status: "unavailable") }
         let window = value as! AXUIElement
+        if bundle == "ai.opencode.desktop" {
+            // OpenCode's window title may be generic. Only exact unique session titles are accepted.
+            guard let title = attribute(window, kAXTitleAttribute) as? String, !["OpenCode", "opencode", ""].contains(title) else { return FocusReport(status: "unavailable") }
+            let matches = OpenCodeStore().read(exactTitle: title)
+            guard matches.count == 1 else { return FocusReport(status: matches.isEmpty ? "unmatched" : "ambiguous", title: title) }
+            return FocusReport(status: "matched", title: title, thread: matches[0])
+        }
         var budget = 80
         var titles: [String] = []
         let deadline = Date().addingTimeInterval(0.6)
@@ -55,7 +66,7 @@ enum ActiveConversation {
         return FocusReport.resolve(title: titles[0], store: store)
     }
     static func probe() -> FocusReport {
-        guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.openai.codex" else { return FocusReport(status: "background") }
-        return read(pid: app.processIdentifier)
+        guard let app = NSWorkspace.shared.frontmostApplication, UsageSources().supports(bundle: app.bundleIdentifier ?? "") else { return FocusReport(status: "background") }
+        return read(pid: app.processIdentifier, bundle: app.bundleIdentifier ?? "")
     }
 }

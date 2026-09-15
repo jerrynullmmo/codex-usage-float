@@ -25,6 +25,14 @@ struct Tokens: Codable, Equatable {
         return Tokens(input: delta(input, old.input), output: delta(output, old.output),
                       cached: delta(cached, old.cached), written: delta(written, old.written), reasoning: delta(reasoning, old.reasoning))
     }
+    func adding(_ other: Tokens) -> Tokens {
+        func sum(_ a: Int64?, _ b: Int64?) -> Int64? {
+            guard let a, let b else { return nil }
+            let result = a.addingReportingOverflow(b); return result.overflow ? nil : result.partialValue
+        }
+        return Tokens(input: sum(input, other.input), output: sum(output, other.output), cached: sum(cached, other.cached),
+                      written: sum(written, other.written), reasoning: sum(reasoning, other.reasoning))
+    }
     var hitRate: Double? {
         guard let input, let cached, input > 0, cached <= input else { return nil }
         return Double(cached) / Double(input) * 100
@@ -44,6 +52,22 @@ struct QuotaWindow: Codable, Equatable {
     }
 }
 
+func usageDate(_ value: String?) -> Date? {
+    guard let value else { return nil }
+    let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+}
+
+struct UsageMember: Codable {
+    var id: String
+    var title: String
+    var total: Tokens?
+    var round: Tokens?
+    var error: String?
+}
+
+protocol SnapshotReader: AnyObject { func poll() -> UsageSnapshot }
+
 struct UsageSnapshot: Codable {
     var total: Tokens?
     var last: Tokens?
@@ -57,13 +81,22 @@ struct UsageSnapshot: Codable {
     var contextWindow: Int64?
     var partialHistory = false
     var error: String?
+    var turnStartedAt: String?
+    var aggregated = false
+    var aggregateRound: Tokens?
+    var members: [UsageMember] = []
+    var sourceName: String = "Codex"
+    var scopeNote: String = "所选本地任务；远程记录需由数据源提供。"
     var round: Tokens? {
+        if aggregated { return aggregateRound }
         guard hasTurn, let total, let baseline else { return nil }
         return total.subtracting(baseline)
     }
 }
 
-final class UsageReader {
+final class UsageReader: SnapshotReader {
+    private var points: [(Date, Tokens)] = []
+    private var timelineTruncated = false
     private(set) var snapshot = UsageSnapshot()
     private var offset: UInt64 = 0
     private var buffer = Data()
@@ -80,7 +113,7 @@ final class UsageReader {
             let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
             let identity = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value
             if !initialized || size < offset || identity != fileIdentity {
-                snapshot = UsageSnapshot(); buffer.removeAll(); fileIdentity = identity
+                snapshot = UsageSnapshot(); points.removeAll(); timelineTruncated = false; buffer.removeAll(); fileIdentity = identity
                 offset = size > initialBytes ? size - initialBytes : 0
                 droppingLine = offset > 0; snapshot.partialHistory = offset > 0; initialized = true
                 // A complete history starts at zero; a truncated tail must not invent a baseline.
@@ -99,6 +132,14 @@ final class UsageReader {
             snapshot.error = nil
         } catch { snapshot.error = "暂时无法读取所选任务的本地记录" }
         return snapshot
+    }
+    // Use the root task boundary for every descendant, not each child's last turn.
+    func usage(since boundary: Date) -> Tokens? {
+        guard snapshot.error == nil else { return nil }
+        let baseline = points.last(where: { $0.0 < boundary })?.1
+            ?? ((!snapshot.partialHistory && !timelineTruncated) ? .zero : nil)
+        guard let baseline else { return nil }
+        return (snapshot.total ?? ((!snapshot.partialHistory && !timelineTruncated) ? .zero : nil))?.subtracting(baseline)
     }
     func ingest(_ bytes: Data) {
         for chunk in bytes.split(separator: 10, omittingEmptySubsequences: false).enumerated() {
@@ -123,12 +164,19 @@ final class UsageReader {
         if kind == "task_started" {
             snapshot.baseline = snapshot.total ?? (snapshot.partialHistory ? nil : .zero)
             snapshot.hasTurn = true; snapshot.running = true; snapshot.last = nil
+            snapshot.turnStartedAt = d["timestamp"] as? String
             snapshot.contextWindow = (p["model_context_window"] as? NSNumber)?.int64Value
         } else if ["task_complete", "task_aborted", "turn_aborted"].contains(kind ?? "") {
             snapshot.running = false
         } else if kind == "token_count" {
             if let info = p["info"] as? [String: Any] {
-                if let t = info["total_token_usage"] as? [String: Any] { snapshot.total = Tokens(t) }
+                if let t = info["total_token_usage"] as? [String: Any] {
+                    snapshot.total = Tokens(t)
+                    if let date = usageDate(d["timestamp"] as? String), let total = snapshot.total {
+                        if points.last?.1 != total { points.append((date, total)) }
+                        if points.count > 8192 { points.removeFirst(points.count - 8192); timelineTruncated = true }
+                    } else { timelineTruncated = true }
+                }
                 if let t = info["last_token_usage"] as? [String: Any] { snapshot.last = Tokens(t) }
                 snapshot.contextWindow = (info["model_context_window"] as? NSNumber)?.int64Value ?? snapshot.contextWindow
                 snapshot.updatedAt = d["timestamp"] as? String
@@ -150,14 +198,15 @@ struct ThreadEntry: Codable, Equatable {
     let id: String
     let title: String
     let path: String
+    var source: String = "codex"
 }
 
 struct ThreadStore {
     let home: URL
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")) { self.home = home }
-    func read(id: String? = nil, exactTitle: String? = nil) -> [ThreadEntry] {
+    func read(id: String? = nil, exactTitle: String? = nil, familyRoot: String? = nil) -> [ThreadEntry] {
         let databases = ((try? FileManager.default.contentsOfDirectory(at: home, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.lastPathComponent.hasPrefix("state_") && $0.pathExtension == "sqlite" }
+            .filter { $0.lastPathComponent.range(of: "^state_[0-9]+\\.sqlite$", options: .regularExpression) != nil }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedDescending }
         guard let path = databases.first?.path else { return [] }
         var db: OpaquePointer?
@@ -166,12 +215,18 @@ struct ThreadStore {
         }
         defer { sqlite3_close(db) }
         sqlite3_busy_timeout(db, 150)
-        let query = "SELECT id, COALESCE(NULLIF(name,''), title), rollout_path FROM threads " +
+        let ordinaryQuery = "SELECT id, COALESCE(NULLIF(name,''), title), rollout_path FROM threads " +
             (id != nil ? "WHERE id = ?" : (exactTitle != nil ? "WHERE COALESCE(NULLIF(name,''), title) = ? LIMIT 2" : "WHERE archived = 0 AND (agent_path IS NULL OR agent_path = '/root') ORDER BY updated_at DESC LIMIT 40"))
+        let query = familyRoot == nil ? ordinaryQuery : """
+        WITH RECURSIVE family(id) AS (
+            SELECT ? UNION SELECT e.child_thread_id FROM thread_spawn_edges e JOIN family f ON e.parent_thread_id = f.id
+        ) SELECT f.id, COALESCE(NULLIF(t.name,''),t.title,f.id), COALESCE(t.rollout_path,'')
+        FROM family f LEFT JOIN threads t ON t.id = f.id
+        """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(statement) }
-        if let value = id ?? exactTitle { _ = value.withCString { sqlite3_bind_text(statement, 1, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) } }
+        if let value = familyRoot ?? id ?? exactTitle { _ = value.withCString { sqlite3_bind_text(statement, 1, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) } }
         var entries: [ThreadEntry] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             func str(_ i: Int32) -> String { sqlite3_column_text(statement, i).map { String(cString: $0) } ?? "" }
@@ -206,6 +261,8 @@ struct Settings: Codable {
     // Optional so existing preferences migrate without losing position or metric choices.
     var autoFollow: Bool?
     var threadID: String?
+    var sourceID: String?
+    var includeSubagents: Bool?
     var onlyCodex = true
     var metrics = Metric.allCases
     var compact = "quota"
