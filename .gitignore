@@ -1,0 +1,12 @@
+/build/
+/dist/
+.DS_Store
+*.dSYM/
+*.xcuserstate
+.env
+.env.*
+*.jsonl
+*.sqlite
+*.sqlite-*
+settings.json
+*.log
