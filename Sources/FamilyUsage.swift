@@ -19,7 +19,7 @@ final class CodexFamilyReader: SnapshotReader {
         let boundary = usageDate(main.turnStartedAt)
         var total = main.error == nil ? main.total : nil
         var round = main.error == nil ? main.round : nil
-        main.members = [UsageMember(id: root.id, title: root.title, total: total, round: round, error: main.error)]
+        main.members = [UsageMember(id: root.id, title: root.title, total: total, round: round, error: main.error, costTotal: main.costTotal, costRound: main.costRound)]
         let ids = Set(entries.map(\.id))
         readers = readers.filter { ids.contains($0.key) }
         for entry in entries where entry.id != root.id {
@@ -28,7 +28,9 @@ final class CodexFamilyReader: SnapshotReader {
             let child = reader.poll()
             let childTotal = child.error == nil ? child.total : nil
             let childRound = boundary.flatMap { reader.usage(since: $0) }
-            main.members.append(UsageMember(id: entry.id, title: entry.title, total: childTotal, round: childRound, error: child.error))
+            main.members.append(UsageMember(id: entry.id, title: entry.title, total: childTotal, round: childRound, error: child.error, costTotal: child.costTotal, costRound: reader.costs.since(boundary)))
+            main.costTotal = (main.costTotal ?? .unknown("缺少主任务费用")).adding(child.costTotal ?? .unknown("缺少子代理费用"))
+            main.costRound = (main.costRound ?? .unknown("缺少主任务费用")).adding(reader.costs.since(boundary))
             total = total?.adding(childTotal ?? Tokens())
             round = round?.adding(childRound ?? Tokens())
             main.running = main.running || child.running

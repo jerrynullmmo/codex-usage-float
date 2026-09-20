@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+from pricing import BOOK, CostLogReader, cost, plus, unknown
 
 FIELDS = ('input', 'output', 'cached', 'written', 'reasoning')
 ZERO = dict.fromkeys(FIELDS, 0)
@@ -112,8 +113,14 @@ def since(snapshot, boundary):
     total = snapshot['total'] or (None if snapshot['_partial'] else ZERO)
     return subtract(total, baseline) if total is not None and baseline is not None else None
 
-def codex_family(task, include_children=True):
-    root = codex_log(task['path'])
+def codex_family(task, include_children=True, cost_readers=None):
+    readers = cost_readers if cost_readers is not None else {}
+    def priced(path):
+        r=readers.setdefault(path,CostLogReader(path)).poll()
+        result=codex_log(path)
+        for k in ('total','round','last'):result['cost'+k.title()]=r.value(k)
+        return result
+    root = priced(task['path'])
     if not include_children: return root
     try:
         with database(task['database']) as db:
@@ -123,12 +130,13 @@ def codex_family(task, include_children=True):
                 FROM family f LEFT JOIN threads t ON f.id=t.id''', (task['id'],))
         total = root['total'] if not root['error'] else None
         current = root['round'] if not root['error'] else None
-        root['members'] = [dict(id=task['id'], title=task['title'], total=total, round=current, error=root['error'])]
+        root['members'] = [dict(id=task['id'], title=task['title'], total=total, round=current, error=root['error'],costTotal=root.get('costTotal'),costRound=root.get('costRound'))]
         boundary = date(root.get('turnStartedAt'))
         for member in family:
             if member['id'] == task['id']: continue
-            child = codex_log(member['path']); ct = child['total'] if not child['error'] else None; cr = since(child, boundary)
-            root['members'].append(dict(id=member['id'], title=member['title'], total=ct, round=cr, error=child['error']))
+            child = priced(member['path']); ct = child['total'] if not child['error'] else None; cr = since(child, boundary)
+            root['members'].append(dict(id=member['id'], title=member['title'], total=ct, round=cr, error=child['error'],costTotal=child['costTotal'],costRound=readers[member['path']].since(boundary)))
+            root['costTotal']=plus(root['costTotal'],child['costTotal']);root['costRound']=plus(root['costRound'],readers[member['path']].since(boundary))
             total = add(total or UNKNOWN, ct or UNKNOWN); current = add(current or UNKNOWN, cr or UNKNOWN)
             root['running'] |= child['running']
             if (date(child['updatedAt']) or 0) > (date(root['updatedAt']) or 0): root['updatedAt'] = child['updatedAt']
@@ -158,29 +166,33 @@ def opencode_family(task, include_children=True):
                 'SELECT id,title FROM session WHERE id=?', (task['id'],))
             messages = {s['id']: rows(db, '''SELECT id,json_extract(data,'$.role') AS role,
                 json_extract(data,'$.tokens') AS tokens,json_extract(data,'$.time.created') AS created,
+                json_extract(data,'$.modelID') AS model,json_extract(data,'$.providerID') AS provider,
                 json_extract(data,'$.time.completed') AS completed,json_extract(data,'$.parentID') AS parent
                 FROM message WHERE session_id=? ORDER BY time_created,id''', (s['id'],)) for s in sessions}
         if task['id'] not in messages: raise ValueError('任务不存在')
         users = [m for m in messages[task['id']] if m['role'] == 'user']; user = users[-1] if users else {}
         boundary = user.get('created'); total = dict(ZERO); current = dict(ZERO)
+        out['costTotal']=cost();out['costRound']=cost() if boundary is not None else unknown('缺少本轮边界')
         for session in sessions:
-            own = dict(ZERO); turn = dict(ZERO)
+            own = dict(ZERO); turn = dict(ZERO);own_cost=cost();round_cost=cost()
             for m in messages[session['id']]:
                 if m['role'] != 'assistant': continue
                 value = opencode_tokens(json.loads(m['tokens'])) if m['tokens'] else dict(UNKNOWN)
                 own = add(own, value)
+                priced=BOOK.quote(value,m.get("model"),m.get("provider"));own_cost=plus(own_cost,priced)
                 if session['id'] == task['id']:
                     inside = m['parent'] == user.get('id') if m['parent'] is not None and user else None
-                    if inside is not False: out['last'] = value if inside else None
+                    if inside is not False: out['last'] = value if inside else None;out['costLast']=priced if inside else unknown('缺少最近调用边界')
                 else:
                     inside = m['created'] >= boundary if m['created'] is not None and boundary is not None else None
-                if inside is None: turn = dict(UNKNOWN)
-                elif inside: turn = add(turn, value)
+                if inside is None: turn = dict(UNKNOWN);round_cost=plus(round_cost,unknown("缺少本轮边界"))
+                elif inside: turn = add(turn, value);round_cost=plus(round_cost,priced)
                 if inside and m['completed'] is None: out['running'] = True
                 stamp = m['completed'] or m['created']
                 if stamp and stamp / 1000 > (date(out['updatedAt']) or 0):
                     out['updatedAt'] = dt.datetime.fromtimestamp(stamp / 1000, dt.timezone.utc).isoformat()
-            out['members'].append(dict(id=session['id'], title=session['title'], total=own, round=turn if boundary is not None else None))
+            out['members'].append(dict(id=session['id'], title=session['title'], total=own, round=turn if boundary is not None else None,costTotal=own_cost,costRound=round_cost))
+            out["costTotal"]=plus(out["costTotal"],own_cost);out["costRound"]=plus(out["costRound"],round_cost)
             total = add(total, own); current = add(current, turn)
         out['total'] = total; out['round'] = current if boundary is not None else None
         out['scopeNote'] = f'含 {len(sessions)-1} 个子代理；最近调用仅指主任务。'
@@ -204,6 +216,16 @@ def read_bridge(path):
         if any(s.get('parentID') and s['parentID'] not in ids for s in sessions): return None
         if any(p in ('com.openai.codex','ai.opencode.desktop') for p in doc.get('bundleIDs', [])): return None
         for session in sessions:
+            calls=session.get('calls')
+            if calls is not None:
+                if not isinstance(calls,list) or len(calls)>5000:return None
+                ids=set()
+                for call in calls:
+                    if not isinstance(call,dict) or not isinstance(call.get('id'),str) or not call['id'] or call['id'] in ids:return None
+                    ids.add(call['id'])
+                    if not isinstance(call.get('model'),str) or not call['model'] or date(call.get('createdAt')) is None or not isinstance(call.get('tokens'),dict):return None
+                    if call.get('provider') is not None and not isinstance(call['provider'],str):return None
+                    if any(v is not None and number(v) is None for v in call['tokens'].values()):return None
             for key in ('total','round','last'):
                 if session.get(key) is not None and not isinstance(session[key],dict): return None
                 for value in (session.get(key) or {}).values():
@@ -219,6 +241,20 @@ def read_bridge(path):
         return doc
     except (OSError, ValueError, TypeError, KeyError): return None
 
+def bridge_costs(session,boundary):
+    calls=session.get('calls')
+    if calls is None:return (unknown('接入程序未提供逐次调用'),)*3
+    total=cost();current=cost() if boundary is not None else unknown('缺少主任务时间边界');summed=dict(ZERO)
+    for call in calls:
+        value=BOOK.quote(counters(call['tokens']),call['model'],call.get('provider'));total=plus(total,value)
+        summed=add(summed,counters(call['tokens']))
+        if boundary is not None and date(call['createdAt'])>=boundary:current=plus(current,value)
+    if session.get('callsComplete') is not True or any(summed[k]!=(session.get('total') or {}).get(k) for k in ('input','output','cached','written')):
+        total=plus(total,unknown('逐次调用未覆盖完整用量'));current=plus(current,unknown('逐次调用未覆盖完整用量'))
+    latest=max(calls,key=lambda c:date(c['createdAt'])) if calls else None
+    recent=BOOK.quote(counters(latest['tokens']),latest['model'],latest.get('provider')) if latest and session.get('callsComplete') is True and counters(session.get('last'))==counters(latest['tokens']) else unknown('接入记录未确认最近调用')
+    return total,current,recent
+
 def bridge_snapshot(task, include_children=True):
     out = blank('外部接入'); doc = read_bridge(task['path'])
     if not doc or 'bridge:' + doc['id'] != task['source']:
@@ -231,16 +267,20 @@ def bridge_snapshot(task, include_children=True):
             old = len(ids); ids.update(s['id'] for s in sessions.values() if s.get('parentID') in ids)
             if old == len(ids): break
     total = dict(ZERO); current = dict(ZERO); boundary = date(root.get('roundStartedAt'))
+    out['costTotal']=cost();out['costRound']=cost();out['costLast']=bridge_costs(root,boundary)[2]
     for sid in ids:
         s = sessions[sid]; own = counters(s.get('total')); turn = counters(s.get('round')) if boundary is not None and date(s.get('roundStartedAt')) == boundary else dict(UNKNOWN)
         total = add(total, own); current = add(current, turn)
-        out['members'].append(dict(id=sid, title=s['title'], total=own, round=turn))
+        priced=bridge_costs(s,boundary)
+        out['costTotal']=plus(out['costTotal'],priced[0]);out['costRound']=plus(out['costRound'],priced[1])
+        out['members'].append(dict(id=sid, title=s['title'], total=own, round=turn,costTotal=priced[0],costRound=priced[1]))
         out['running'] |= bool(s.get('running'))
     out.update(sourceName=doc['name'], total=total, round=current if boundary is not None else None,
                last=counters(root.get('last')), updatedAt=root.get('updatedAt') or doc['updatedAt'],
                scopeNote=f"含 {len(ids)-1} 个子代理；最近调用仅指主任务。")
     quota = doc.get('quota') or {}; out.update(windows=quota.get('windows', []), plan=quota.get('plan'), quotaUpdatedAt=quota.get('updatedAt'))
     if include_children and doc.get('childrenComplete') is not True:
+        out['costTotal']=plus(out['costTotal'],unknown('子代理完整性未确认'));out['costRound']=plus(out['costRound'],unknown('子代理完整性未确认'))
         out.update(total=None, round=None, error='接入程序未确认子代理完整性')
     if not fresh(doc['updatedAt']): out['error'] = '接入数据超过 15 秒未更新'
     return out
@@ -248,6 +288,7 @@ def bridge_snapshot(task, include_children=True):
 class Catalog:
     def __init__(self, home=None, adapter_dir=None):
         self.home = Path(home or Path.home())
+        self.cost_readers = {}; self.cost_root = None
         self.adapter_dir = Path(adapter_dir or Path(os.environ.get('APPDATA', self.home)) / 'AI Usage Float/adapters')
     def bridges(self):
         pairs = [(p,d) for p in sorted(self.adapter_dir.glob('*.json'))[:32] if (d := read_bridge(p))]
@@ -306,6 +347,9 @@ class Catalog:
         s = next((s for s in d['sessions'] if s['id'] == d.get('activeSessionID')),None)
         return dict(id=s['id'],title=s['title'],source='bridge:'+d['id'],path=str(p)) if s else None
     def snapshot(self, task, include_children=True):
+        if task['source']=='codex':
+            if self.cost_root != task['id']:self.cost_readers={};self.cost_root=task['id']
+            return codex_family(task,include_children,self.cost_readers)
         reader = {'codex':codex_family,'opencode':opencode_family}.get(task['source'],bridge_snapshot)
         return reader(task,include_children)
 

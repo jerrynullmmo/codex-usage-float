@@ -121,7 +121,14 @@ final class MonitorView: NSView {
             }
             y += 29
         }
-        y += 10
+        y += 8
+        text("API 估算 USD", 18, y, 92, size: 10, color: accent)
+        for (cost, x) in [(owner.snapshot.costTotal, CGFloat(108)), (owner.snapshot.costRound, CGFloat(204)), (owner.snapshot.costLast, CGFloat(298))] {
+            text(cost?.label ?? "—", x, y, 90, size: 10, color: accent, mono: true, align: .right)
+        }
+        y += 24
+        text(PriceBook.shared.label + " · Standard 参考价", 18, y, 371, size: 9, color: muted); y += 16
+        text("非实际扣费；+ ? 为部分金额。明细见设置。", 18, y, 371, size: 9, color: muted); y += 20
         text("输入含缓存；输出含推理，勿重复相加。", 18, y, 371, size: 10, color: muted); y += 18
         text("— 表示未提供或不完整；0 为数据源上报值。", 18, y, 371, size: 10, color: muted); y += 18
         text(owner.snapshot.scopeNote, 18, y, 371, size: 10, color: muted); y += 25
@@ -176,6 +183,7 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     var signalColor: NSColor { snapshot.error != nil ? .systemOrange : (validQuota.map { $0.remaining <= 10 ? .systemOrange : accent } ?? .gray) }
     var compactLabel: String {
+        if settings.compact == "totalCost", selected != nil { return snapshot.costTotal?.label ?? "费用待核" }
         if followsCurrent && selected == nil { return focusReport.status == "permission" ? "需辅助功能权限" : "待识别对话" }
         if settings.compact == "quota" {
             let stale = ageSeconds(snapshot.quotaUpdatedAt).map { $0 >= 300 } ?? true
@@ -328,7 +336,7 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if pinned { showCard() } else { card.orderOut(nil) }
         repaint()
     }
-    private func cardHeight() -> CGFloat { 300 + CGFloat(max(1, snapshot.windows.count)) * 62 + CGFloat(settings.metrics.count) * 29 - (snapshot.windows.isEmpty ? 18 : 0) }
+    private func cardHeight() -> CGFloat { 358 + CGFloat(max(1, snapshot.windows.count)) * 62 + CGFloat(settings.metrics.count) * 29 - (snapshot.windows.isEmpty ? 18 : 0) }
     func showCard() {
         placeCard(); if !card.isVisible { card.orderFrontRegardless() }; cardView.needsDisplay = true
     }
@@ -420,6 +428,7 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 for metric in Metric.allCases {
                     row.submenu?.addItem(NSMenuItem(title: metric.label + "：" + metric.value(member.total) + " · 本轮 " + metric.value(member.round), action: nil, keyEquivalent: ""))
                 }
+                row.submenu?.addItem(NSMenuItem(title: "API 估算：" + (member.costTotal?.label ?? "—") + " · 本轮 " + (member.costRound?.label ?? "—"), action: nil, keyEquivalent: ""))
                 members.submenu?.addItem(row)
             }
             menu.addItem(members)
@@ -428,8 +437,27 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try? FileManager.default.createDirectory(at: UsageBridge.directory, withIntermediateDirectories: true)
             NSWorkspace.shared.open(UsageBridge.directory)
         })
+        let prices = NSMenuItem(title: "API 费用明细与价目", action: nil, keyEquivalent: ""); prices.submenu = NSMenu()
+        for (title, value) in [("任务合计", snapshot.costTotal), ("本轮", snapshot.costRound), ("最近调用", snapshot.costLast)] {
+            prices.submenu?.addItem(NSMenuItem(title: title + "：" + (value?.label ?? "—"), action: nil, keyEquivalent: ""))
+            for reason in value?.reasons ?? [] { prices.submenu?.addItem(NSMenuItem(title: "  " + reason, action: nil, keyEquivalent: "")) }
+        }
+        for model in Array(Set((snapshot.costTotal?.models ?? []) + (snapshot.costLast?.models ?? []))).sorted() {
+            prices.submenu?.addItem(NSMenuItem(title: model, action: nil, keyEquivalent: ""))
+        }
+        prices.submenu?.addItem(NSMenuItem(title: "Standard/全球参考；Claude 写入按5分钟；DeepSeek按峰价", action: nil, keyEquivalent: ""))
+        prices.submenu?.addItem(NSMenuItem(title: "不含工具、搜索、媒体、存储、税费及套餐扣费", action: nil, keyEquivalent: ""))
+        prices.submenu?.addItem(item("查看内置官方价目与来源") {
+            if let url = Bundle.main.url(forResource: "prices", withExtension: "json") { NSWorkspace.shared.open(url) }
+        })
+        prices.submenu?.addItem(item("编辑自定义价目（重启生效）") {
+            let url = PriceBook.customURL
+            if !FileManager.default.fileExists(atPath: url.path), let bundled = Bundle.main.url(forResource: "prices", withExtension: "json") { try? FileManager.default.copyItem(at: bundled, to: url) }
+            NSWorkspace.shared.open(url)
+        })
+        menu.addItem(prices)
         let compact = NSMenuItem(title: "浮标显示内容", action: nil, keyEquivalent: ""); compact.submenu = NSMenu()
-        for (key, label) in [("quota", "套餐剩余比例"), ("totalInput", "任务累计输入"), ("totalOutput", "任务累计输出"), ("roundInput", "本轮输入"), ("roundOutput", "本轮输出")] {
+        for (key, label) in [("quota", "套餐剩余比例"), ("totalInput", "任务累计输入"), ("totalOutput", "任务累计输出"), ("roundInput", "本轮输入"), ("roundOutput", "本轮输出"), ("totalCost", "API 估算费用")] {
             compact.submenu?.addItem(item(label, checked: settings.compact == key) { [weak self] in self?.settings.compact = key; self?.save() })
         }
         menu.addItem(compact)
@@ -485,6 +513,11 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             checks["card_does_not_cover_pill"] = !card.frame.intersects(pill.frame)
             checks["live_tokens_loaded"] = snapshot.total?.input != nil
             let originalSnapshot = snapshot
+            checks["packaged_price_catalog_loaded"] = PriceBook.shared.document?.models.count == 50
+            let originalCompact = settings.compact
+            snapshot.costTotal = APICost(usd: 1.2345); settings.compact = "totalCost"
+            checks["compact_cost_rendered"] = compactLabel == "$1.2345"
+            settings.compact = originalCompact; snapshot = originalSnapshot
             snapshot.windows = [QuotaWindow(used: 40, minutes: 300, resets: Date().timeIntervalSince1970 - 1)]
             checks["expired_quota_is_unknown"] = validQuota == nil && compactLabel == "额度待更新"
             snapshot = originalSnapshot

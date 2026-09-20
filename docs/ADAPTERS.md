@@ -82,3 +82,25 @@ python3 examples/bridge-demo.py > /tmp/usage-bridge-example.json
 ```
 
 真实接入安装后，可手动选择其任务核对用量，再验证 A→B→A 切换及停止接入程序后的清空行为。合成文件使用不存在的 `org.example.desktop`，不会绑定到任何已安装软件。不要把示例中的模拟数字改名伪装成真实应用读数。
+
+
+## 可选的逐次调用与费用（v0.4）
+
+`schemaVersion` 仍为 1，旧接入文件继续提供 Token；未提供下列字段时，费用显示未知。每个 session 可增加 `callsComplete: true` 和 `calls`。每项调用必须有本任务内唯一的 `id`、准确的 `model`、ISO 8601 `createdAt`、同现有口径的 `tokens`，以及可选的原厂 `provider`（例如 `anthropic`）。调用的输入包含读写缓存，输出包含推理；只能提供本任务自己的调用，不能复制子任务调用。最多 5,000 项，文件仍受 1 MB 限制。
+
+```json
+{
+  "callsComplete": true,
+  "calls": [{
+    "id": "request-1", "provider": "anthropic", "model": "claude-sonnet-5",
+    "createdAt": "2026-09-20T10:00:00Z",
+    "tokens": {"input": 100000, "output": 1000, "cached": 60000, "written": 10000, "reasoning": 0}
+  }]
+}
+```
+
+完整性声明之外，调用合计还必须与 session 的累计计量吻合。若缺记录，保留已知部分并显示 `+ ?`。费用本轮按主任务的 `roundStartedAt` 筛选所有后代调用；最近调用只展示主任务，且需与 `last` 计量相符。未知模型禁止擅自改写成相近型号。
+
+价目契约：`pricing.json` 的 `schemaVersion: 1`、`currency: "USD"`、`verifiedAt` 和 `models`。每行包含 `provider`、精确 `model`、明确的 `aliases`、官方 `source` URL、`note`，以及 `rates: [普通输入, 缓存读取, 缓存写入, 输出]`，单位均为 USD/百万 Token。无此计费项用 `null`；若缓存写入沿用普通输入价，填写相同单价。分档模型同时提供正整数 `threshold` 与 `longRates`，单次输入严格大于阈值才用长上下文价。未知或无效价目不能隐式退回 OpenAI 的价格。自定义文件替换内置目录，并明确标注为自定义；建议从内置文件复制编辑，保留核对日期和真实来源。
+
+Mac 自定义文件：`~/Library/Application Support/Codex Usage Float/pricing.json`；Windows：`%APPDATA%/AI Usage Float/pricing.json`。改完重启浮窗。价目只用于离线参考，程序不验证中转服务实际使用的模型，也不把内置价格视作历史发票。

@@ -73,6 +73,7 @@ final class OpenCodeReader: SnapshotReader {
                 messages[id] = try db.rows("""
                     SELECT id, json_extract(data,'$.role') AS role, json_extract(data,'$.tokens') AS tokens,
                     json_extract(data,'$.time.created') AS created, json_extract(data,'$.time.completed') AS completed,
+                    json_extract(data,'$.modelID') AS model, json_extract(data,'$.providerID') AS provider,
                     json_extract(data,'$.parentID') AS parent FROM message WHERE session_id = ? ORDER BY time_created,id
                     """, [id])
             }
@@ -82,13 +83,17 @@ final class OpenCodeReader: SnapshotReader {
             result.hasTurn = user != nil
             result.turnStartedAt = boundary.map { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: $0 / 1000)) }
             var total = Tokens.zero; var round = Tokens.zero
+            result.costTotal = APICost(); result.costRound = boundary == nil ? .unknown("缺少本轮边界") : APICost()
             for session in sessions {
                 let id = session["id"]!
                 var ownTotal = Tokens.zero; var ownRound = Tokens.zero
+                var ownCost = APICost(); var roundCost = APICost()
                 for message in messages[id] ?? [] where message["role"] == "assistant" {
                     let decoded = message["tokens"].flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any]
                     let value = decoded.map(Self.tokens) ?? Tokens()
                     ownTotal = ownTotal.adding(value)
+                    let cost = PriceBook.shared.quote(value, model: message["model"], provider: message["provider"])
+                    ownCost = ownCost.adding(cost)
                     let created = message["created"].flatMap(Double.init)
                     // Root parentID is stronger than time; child calls use the root time boundary.
                     let inRound: Bool?
@@ -97,16 +102,17 @@ final class OpenCodeReader: SnapshotReader {
                     } else {
                         inRound = created.flatMap { time in boundary.map { time >= $0 } }
                     }
-                    if inRound == true { ownRound = ownRound.adding(value) }
-                    if inRound == nil { ownRound = Tokens() }
-                    if id == root.id, inRound != false { result.last = inRound == true ? value : nil }
+                    if inRound == true { ownRound = ownRound.adding(value); roundCost = roundCost.adding(cost) }
+                    if inRound == nil { ownRound = Tokens(); roundCost = roundCost.adding(.unknown("缺少本轮边界")) }
+                    if id == root.id, inRound != false { result.last = inRound == true ? value : nil; result.costLast = inRound == true ? cost : .unknown("缺少最近调用边界") }
                     if message["completed"] == nil && inRound == true { result.running = true }
                     if let time = (message["completed"] ?? message["created"]).flatMap(Double.init) {
                         let date = Date(timeIntervalSince1970: time / 1000)
                         if date > (usageDate(result.updatedAt) ?? .distantPast) { result.updatedAt = ISO8601DateFormatter().string(from: date) }
                     }
                 }
-                result.members.append(UsageMember(id: id, title: session["title"] ?? id, total: ownTotal, round: boundary == nil ? nil : ownRound))
+                result.members.append(UsageMember(id: id, title: session["title"] ?? id, total: ownTotal, round: boundary == nil ? nil : ownRound, costTotal: ownCost, costRound: roundCost))
+                result.costTotal = result.costTotal?.adding(ownCost); result.costRound = result.costRound?.adding(roundCost)
                 total = total.adding(ownTotal); round = round.adding(ownRound)
             }
             result.total = total; result.aggregated = true; result.aggregateRound = boundary == nil ? nil : round

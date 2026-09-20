@@ -64,11 +64,16 @@ struct UsageMember: Codable {
     var total: Tokens?
     var round: Tokens?
     var error: String?
+    var costTotal: APICost?
+    var costRound: APICost?
 }
 
 protocol SnapshotReader: AnyObject { func poll() -> UsageSnapshot }
 
 struct UsageSnapshot: Codable {
+    var costTotal: APICost?
+    var costRound: APICost?
+    var costLast: APICost?
     var total: Tokens?
     var last: Tokens?
     var baseline: Tokens?
@@ -104,6 +109,7 @@ final class UsageReader: SnapshotReader {
     private var fileIdentity: UInt64?
     private var initialized = false
     let path: String
+    lazy var costs = CostLogReader(path: path)
     // Read a bounded tail on first attachment; do not scan huge conversation bodies.
     let initialBytes: UInt64
     init(path: String, initialBytes: UInt64 = 8 * 1024 * 1024) { self.path = path; self.initialBytes = initialBytes }
@@ -131,6 +137,7 @@ final class UsageReader: SnapshotReader {
             }
             snapshot.error = nil
         } catch { snapshot.error = "暂时无法读取所选任务的本地记录" }
+        costs.poll(); snapshot.costTotal = costs.total; snapshot.costRound = costs.round; snapshot.costLast = costs.last
         return snapshot
     }
     // Use the root task boundary for every descendant, not each child's last turn.

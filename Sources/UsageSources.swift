@@ -5,6 +5,8 @@ struct BridgeSession: Codable {
     var id: String
     var title: String
     var parentID: String?
+    var calls: [PricedCall]?
+    var callsComplete: Bool?
     var total: Tokens?
     var last: Tokens?
     var round: Tokens?
@@ -45,6 +47,13 @@ struct UsageBridge: Codable {
         guard doc.sessions.allSatisfy({ $0.parentID.map { ids.contains($0) } ?? true }),
               !doc.bundleIDs.contains(where: { ["com.openai.codex", "ai.opencode.desktop"].contains($0) }) else { return nil }
         for session in doc.sessions {
+            if let calls = session.calls {
+                guard calls.count <= 5000, Set(calls.map(\.id)).count == calls.count,
+                      calls.allSatisfy({ !$0.id.isEmpty && !$0.model.isEmpty && usageDate($0.createdAt) != nil }) else { return nil }
+                for call in calls {
+                    guard [call.tokens.input, call.tokens.output, call.tokens.cached, call.tokens.written, call.tokens.reasoning].compactMap({ $0 }).allSatisfy({ $0 >= 0 }) else { return nil }
+                }
+            }
             for tokens in [session.total, session.last, session.round].compactMap({ $0 }) {
                 if [tokens.input, tokens.output, tokens.cached, tokens.written, tokens.reasoning].compactMap({ $0 }).contains(where: { $0 < 0 }) { return nil }
             }
@@ -83,16 +92,21 @@ final class BridgeReader: SnapshotReader {
             }
         }
         var total = Tokens.zero; var round = Tokens.zero
+        result.costTotal = APICost(); result.costRound = APICost()
+        result.costLast = bridgeCosts(root, boundary: usageDate(root.roundStartedAt)).2
         for session in doc.sessions where ids.contains(session.id) {
             let sameRound = usageDate(root.roundStartedAt) != nil && usageDate(root.roundStartedAt) == usageDate(session.roundStartedAt)
             let current = sameRound ? session.round : nil
             total = total.adding(session.total ?? Tokens()); round = round.adding(current ?? Tokens())
-            result.members.append(UsageMember(id: session.id, title: session.title, total: session.total, round: current))
+            let costs = bridgeCosts(session, boundary: usageDate(root.roundStartedAt))
+            result.costTotal = result.costTotal?.adding(costs.0); result.costRound = result.costRound?.adding(costs.1)
+            result.members.append(UsageMember(id: session.id, title: session.title, total: session.total, round: current, costTotal: costs.0, costRound: costs.1))
             result.running = result.running || (session.running ?? false)
         }
         result.total = total; result.aggregated = true; result.aggregateRound = result.hasTurn ? round : nil
         result.scopeNote = "\(doc.name) 提供；含 \(ids.count - 1) 个子代理。"
         if includeChildren && doc.childrenComplete != true {
+            result.costTotal = result.costTotal?.adding(.unknown("子代理完整性未确认")); result.costRound = result.costRound?.adding(.unknown("子代理完整性未确认"))
             result.total = nil; result.aggregateRound = nil; result.error = "接入程序未确认子代理完整性，请查看明细或关闭汇总"
         }
         if !doc.isActiveFresh { result.error = "接入数据超过 15 秒未更新，请检查接入程序" }

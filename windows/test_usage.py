@@ -92,3 +92,44 @@ class Accounting(unittest.TestCase):
         p,d=self.bridge();d['sessions'][1]['roundStartedAt']='2000-01-01T00:00:00Z';p.write_text(json.dumps(d));self.assertIsNone(bridge_snapshot(dict(path=str(p),source='bridge:example',id='r'))['round']['input'])
 
 if __name__=='__main__':unittest.main()
+
+class PricingTests(unittest.TestCase):
+    def test_multi_provider_prices_and_boundaries(self):
+        from pricing import BOOK
+        value=dict(input=100000,output=1000,cached=60000,written=10000,reasoning=800)
+        for model,expected in [('gpt-6-astra',.535),('claude-sonnet-5',.107),('gemini-2.5-flash',.0163),('deepseek-flash',.01356)]:
+            with self.subTest(model=model):
+                result=BOOK.quote(value,model);self.assertTrue(result['complete']);self.assertAlmostEqual(result['usd'],expected)
+        self.assertFalse(BOOK.quote(value,'unknown-model')['complete'])
+        self.assertFalse(BOOK.quote(value,'gpt-6-astra','anthropic')['complete'])
+        self.assertFalse(BOOK.quote(dict(input=100,output=1,cached=10),'gpt-6-astra')['complete'])
+        self.assertTrue(BOOK.quote(dict(input=100,output=1,cached=10),'gpt-4.1')['complete'])
+        self.assertFalse(BOOK.quote(dict(input=100,output=1,cached=90,written=20),'gpt-6-astra')['complete'])
+        self.assertAlmostEqual(BOOK.quote(dict(input=300000,output=1000,cached=0,written=0),'gpt-6-astra')['usd'],6.075)
+    def test_incremental_mixed_model_replay(self):
+        from pricing import CostLogReader,plus,unknown,cost,label
+        import tempfile
+        def event(kind,payload):return json.dumps(dict(type=kind,timestamp='2026-09-20T10:00:00Z',payload=payload))+'\n'
+        def count(total,last):return event('event_msg',dict(type='token_count',info=dict(total_token_usage=total,last_token_usage=last)))
+        one=dict(input_tokens=100000,output_tokens=1000,cached_input_tokens=60000,cache_write_input_tokens=10000)
+        two={k:v*2 for k,v in one.items()}
+        started=event('event_msg',dict(type='task_started'))
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'log.jsonl'
+            p.write_text(started+event('turn_context',dict(model='gpt-6-astra'))+count(one,one))
+            reader=CostLogReader(p).poll();self.assertAlmostEqual(reader.value('total')['usd'],.535)
+            with p.open('a') as f:f.write(count(one,one)+started+event('turn_context',dict(model='claude-sonnet-5'))+count(two,one))
+            reader.poll();self.assertAlmostEqual(reader.value('total')['usd'],.642);self.assertAlmostEqual(reader.value('round')['usd'],.107)
+            self.assertEqual(len(reader.value('total')['models']),2)
+            p.write_text(started+event('turn_context',dict(model='gpt-6-astra'))+count(one,one))
+            reader.poll();self.assertAlmostEqual(reader.value('total')['usd'],.535)
+        self.assertIn(' + ?',label(plus(cost(1),unknown('missing'))))
+    def test_bridge_mixed_model_and_missing_coverage(self):
+        from usage_core import bridge_costs,date
+        value=dict(input=100000,output=1000,cached=60000,written=10000,reasoning=0)
+        calls=[dict(id='a',model='gpt-6-astra',createdAt='2026-09-20T09:00:00Z',tokens=value),dict(id='b',model='claude-sonnet-5',createdAt='2026-09-20T11:00:00Z',tokens=value)]
+        s=dict(calls=calls,callsComplete=True,total={k:v*2 for k,v in value.items()})
+        total,current,last=bridge_costs(s,date('2026-09-20T10:00:00Z'))
+        self.assertTrue(total['complete']);self.assertAlmostEqual(total['usd'],.642);self.assertAlmostEqual(current['usd'],.107)
+        s['callsComplete']=False
+        self.assertFalse(bridge_costs(s,date('2026-09-20T10:00:00Z'))[0]['complete'])

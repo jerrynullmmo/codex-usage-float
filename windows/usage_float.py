@@ -12,6 +12,7 @@ import sys
 import time
 from types import SimpleNamespace
 import tkinter as tk
+import pricing
 from usage_core import Catalog, FIELDS, blank, date, same_focus, same_task
 
 LABELS = dict(input='输入',output='输出',cached='缓存读取',written='缓存写入',reasoning='推理输出')
@@ -86,7 +87,9 @@ class FloatApp:
         from tray import Tray
         self.tray=Tray(self.root,self.hwnd,self.tray_menu)
         if not self.tray.added:self.tray_visible=True;self.show(True)
-        self.draw(); self.root.after(100,self.tick)
+        self.draw()
+        # UI tests supply a controlled clock; a real hover timer must not overwrite it.
+        if not self.test:self.root.after(100,self.tick)
     def save(self):
         if self.test: return
         self.settings.update(x=self.anchor[0],y=self.anchor[1],autoFollow=self.auto,includeSubagents=self.include_children)
@@ -95,7 +98,7 @@ class FloatApp:
         target=self.folder/'settings.json'; temp=target.with_suffix('.tmp')
         temp.write_text(json.dumps(self.settings,ensure_ascii=False),encoding='utf-8'); temp.replace(target)
     def geometry(self):
-        width,height = (480,520) if self.expanded else (160,36)
+        width,height = (480,580) if self.expanded else (160,36)
         x=max(0,min(self.anchor[0],self.root.winfo_screenwidth()-width))
         y=max(0,min(self.anchor[1],self.root.winfo_screenheight()-height-40))
         self.root.geometry(f'{width}x{height}+{x}+{y}')
@@ -160,6 +163,7 @@ class FloatApp:
         if not self.expanded:
             c.create_oval(12,14,19,21,fill=accent,outline='')
             if self.auto and not self.selected: label='待识别对话'
+            elif self.settings.get('compact')=='cost':label=pricing.label(self.snapshot.get('costTotal'))
             elif self.settings.get('compact','quota')=='quota':
                 valid=[w for w in self.snapshot['windows'] if (w.get('resets') or float('inf'))>time.time()]
                 label=f"额度 {min(100-w['used'] for w in valid):.0f}%" if valid else '额度待更新'
@@ -191,10 +195,14 @@ class FloatApp:
             y+=27
         total=self.snapshot.get('total') or {}; rate=total.get('cached')/total['input']*100 if total.get('input') and total.get('cached') is not None and total['cached']<=total['input'] else None
         text(18,y,'合计缓存命中',10);text(462,y,'—' if rate is None else f'{rate:.1f}%',10,anchor='ne')
-        text(18,421,'输入含缓存；输出含推理；— 表示未知。',9)
-        text(18,443,self.snapshot['scopeNote'][:48],9)
-        text(18,480,(self.snapshot['error'] or ('任务执行中' if self.snapshot['running'] else '等待下一轮'))[:48],9,accent)
-        stamp=date(self.snapshot.get('updatedAt'));text(462,500,'未上报' if stamp is None else f'{max(0,int(time.time()-stamp))} 秒前更新',8,anchor='ne')
+        text(18,411,'API 估算 USD',10,accent)
+        for key,x in [('costTotal',260),('costRound',360),('costLast',462)]:text(x,411,pricing.label(self.snapshot.get(key)),10,accent,'ne')
+        text(18,437,pricing.BOOK.title+' · Standard 参考价',9)
+        text(18,457,'非实际扣费；+ ? 为部分金额；明细见设置。',9)
+        text(18,481,'输入含缓存；输出含推理；— 表示未知。',9)
+        text(18,503,self.snapshot['scopeNote'][:48],9)
+        text(18,540,(self.snapshot['error'] or ('任务执行中' if self.snapshot['running'] else '等待下一轮'))[:48],9,accent)
+        stamp=date(self.snapshot.get('updatedAt'));text(462,560,'未上报' if stamp is None else f'{max(0,int(time.time()-stamp))} 秒前更新',8,anchor='ne')
     def press(self,event):
         if self.expanded and event.y<50 and event.x>=400:self.menu(event);return
         self.drag=(event.x_root,event.y_root,self.anchor);self.dragged=False
@@ -232,8 +240,22 @@ class FloatApp:
             for k in FIELDS:sub.add_command(label=f"{LABELS[k]}：{formatted((member.get('total') or {}).get(k))} · 本轮 {formatted((member.get('round') or {}).get(k))}",state='disabled')
             members.add_cascade(label=member['title'][:32],menu=sub)
         menu.add_cascade(label='查看各任务明细',menu=members)
+        prices=tk.Menu(menu,tearoff=False)
+        for key,title in [('costTotal','任务合计'),('costRound','本轮'),('costLast','最近调用')]:
+            value=self.snapshot.get(key)
+            prices.add_command(label=title+'：'+pricing.label(value),state='disabled')
+            for reason in (value or {}).get('reasons',[]):prices.add_command(label=reason,state='disabled')
+        prices.add_command(label='Standard/全球；Claude写入5分钟；DeepSeek峰价',state='disabled')
+        prices.add_command(label='不含工具、搜索、媒体、存储、税费及套餐扣费',state='disabled')
+        prices.add_command(label='查看内置价目与来源',command=lambda:os.startfile(pricing.BUNDLED))
+        def custom_prices():
+            pricing.CUSTOM.parent.mkdir(parents=True,exist_ok=True)
+            if not pricing.CUSTOM.exists():pricing.CUSTOM.write_bytes(pricing.BUNDLED.read_bytes())
+            os.startfile(pricing.CUSTOM)
+        prices.add_command(label='编辑自定义价目（重启生效）',command=custom_prices)
+        menu.add_cascade(label='API 费用明细与价目',menu=prices)
         compact=tk.Menu(menu,tearoff=False)
-        for key,label in [('quota','套餐剩余比例'),('input','累计输入'),('output','累计输出')]:
+        for key,label in [('quota','套餐剩余比例'),('input','累计输入'),('output','累计输出'),('cost','API 估算费用')]:
             compact.add_command(label=label,command=lambda k=key:self.preference('compact',k))
         menu.add_cascade(label='浮标显示内容',menu=compact)
         metrics=tk.Menu(menu,tearoff=False)
@@ -271,6 +293,9 @@ class FloatApp:
         old=self.generation;self.generation+=1
         checks['late_result_rejected']=not self.accept((old,None,blank('AI'),None))
         checks['interactive_desktop']=bool(before)
+        checks['packaged_price_catalog_loaded']=pricing.BOOK.document is not None and len(pricing.BOOK.document['models'])==50
+        self.snapshot['costTotal']=pricing.cost(1.2345);self.draw()
+        checks['cost_row_rendered']=any(self.canvas.itemcget(i,'text')=='$1.2345' for i in self.canvas.find_all() if self.canvas.type(i)=='text')
         Path(output).write_text(json.dumps(checks,indent=2),encoding='utf-8')
         self.quit();return all(checks.values())
 

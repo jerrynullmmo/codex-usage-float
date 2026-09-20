@@ -36,3 +36,6 @@ powershell -NoProfile -File windows/build.ps1
 构建先运行合成计量测试，再编译只读标题探测器，最后打包独立程序。不会安装、启动目标软件或产生模型费用。产物在 `dist/`，附项目许可证及运行时许可声明。应用仅支持 x64；其他架构尚未验收。
 
 命令行诊断：从源码运行 `python windows/usage_float.py --list` 或 `--snapshot <任务编号> --source codex --output <文件路径>`。诊断包含个人任务名称及计量，切勿提交到公开仓库。界面自测 `AIUsageFloat.exe --ui-test <输出路径>` 必须在已登录的交互桌面运行；SSH 会话中的空桌面不能证明真实悬停与焦点行为。
+
+
+费用估算：详情显示任务、本轮、最近调用的官方 API 参考金额（美元）。设置菜单“API 费用明细与价目”提供未知原因、官方来源、自定义价格入口；浮标可切换显示费用。内置 OpenAI、Anthropic、Google、DeepSeek 价目与 Mac 共用 `prices.json`，模型/缓存/子任务按各调用计算。`+ ?` 表示部分已知金额，不能作为完整账单。采用 Standard/全球文本参考价、Claude 5 分钟写入、DeepSeek 峰价；不含其他服务费，不等于套餐扣费。详见主 README 的口径说明。
