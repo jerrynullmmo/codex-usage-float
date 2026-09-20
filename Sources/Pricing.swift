@@ -158,6 +158,7 @@ final class CostLogReader {
             ready = offset == size && buffer.isEmpty && !dropping
         } catch { ready = false }
     }
+    var hasMore: Bool { ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber).map { offset < $0.uint64Value } ?? false }
     var total: APICost { ready ? ledger.total : .unknown("正在回溯费用或记录不可读") }
     var round: APICost { ready ? ledger.round : .unknown("正在回溯费用或记录不可读") }
     var last: APICost { ready ? ledger.last : .unknown("正在回溯费用或记录不可读") }

@@ -94,7 +94,7 @@ try (at(after, event("task_started") + count(50, 5))).write(to: grandLog)
 check(sqlite3_open(directory.appendingPathComponent("state_5.sqlite").path, &db) == SQLITE_OK, "open family fixture index")
 sqlite3_exec(db, "CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT);", nil, nil, nil)
 func insertThread(_ id: String, _ path: String) {
-    sqlite3_exec(db, "INSERT INTO threads VALUES ('\(id)','\(id)','\(id)','\(path)');", nil, nil, nil)
+    sqlite3_exec(db, "INSERT INTO threads (id,name,title,rollout_path) VALUES ('\(id)','\(id)','\(id)','\(path)');", nil, nil, nil)
 }
 insertThread("root", rootLog.path); insertThread("child", childLog.path); insertThread("grand", grandLog.path)
 sqlite3_exec(db, "INSERT INTO thread_spawn_edges VALUES ('root','child','closed'),('child','grand','open'),('grand','child','open');", nil, nil, nil)
@@ -237,3 +237,28 @@ let pricedFamily = CodexFamilyReader(root: ThreadEntry(id: "priced-root", title:
 check(pricedFamily.costTotal?.complete == true && abs(pricedFamily.costTotal!.usd - 1.284) < 0.00000001, "mixed-provider child costs sum once")
 check(abs(pricedFamily.costRound!.usd - 0.642) < 0.00000001 && abs(pricedFamily.costLast!.usd - 0.535) < 0.00000001, "child cost uses root boundary while recent cost stays root-only")
 print("\(passed) final checks passed")
+
+// Overview must enumerate the full catalog and sum individual sessions, never recursive families.
+sqlite3_open(directory.appendingPathComponent("state_5.sqlite").path, &db)
+sqlite3_exec(db, "ALTER TABLE threads ADD COLUMN updated_at INTEGER DEFAULT 1; ALTER TABLE threads ADD COLUMN archived INTEGER DEFAULT 1; ALTER TABLE threads ADD COLUMN agent_path TEXT DEFAULT '/root/child';", nil, nil, nil)
+for i in 0..<45 { insertThread("archive-\(i)", childLog.path) }
+sqlite3_close(db)
+let allEntries = try UsageSources(bridgeDirectory: directory.appendingPathComponent("absent")).allEntries(codexHome: directory, openCodePath: ocPath)
+check(allEntries.count > 45 && allEntries.contains(where: { $0.id == "och" }), "overview catalog includes all archived children beyond recent 40")
+let ae = [ThreadEntry(id:"p",title:"",path:pricedRoot.path),ThreadEntry(id:"c",title:"",path:pricedChild.path)]
+let allReader = AllUsageReader(cacheURL:nil,catalog:{ ae + [ae[0]] })
+var overviewResult = allReader.poll()
+while overviewResult.loaded < overviewResult.count { overviewResult = allReader.poll() }
+check(overviewResult.count == 2 && overviewResult.total.input == 400000 && abs(overviewResult.cost.usd - 1.284) < 0.00000001, "all-task total deduplicates sessions and includes mixed-provider child costs once")
+let allAgain = allReader.poll(force:true)
+check(allAgain.total == overviewResult.total && allAgain.cost.usd == overviewResult.cost.usd, "overview refresh cannot accumulate snapshots twice")
+try FileManager.default.removeItem(at: pricedChild)
+overviewResult = allReader.poll(force:true)
+check(overviewResult.total.input == 200000 && overviewResult.value(.input).contains("+ ?") && !overviewResult.cost.complete, "unreadable history retains marked known subtotal instead of a false complete sum")
+let aeOther = ThreadEntry(id:"p",title:"",path:"",source:"bridge:other")
+let zeroCache: [String: AllUsageReader.Cached] = ["codex:p": .init(signature:"",tokens:.zero,cost:APICost()), "bridge:other:p": .init(signature:"",tokens:Tokens(input:10,output:5),cost:APICost(usd:2))]
+let namespaceResult = AllUsageReader.summarize(entries:[ae[0],aeOther],cache:zeroCache)
+check(namespaceResult.count == 2 && namespaceResult.total.input == 10 && namespaceResult.tokenLabel == "15", "source namespace separates equal task IDs and total tokens excludes cache and reasoning")
+check(namespaceResult.value(.written).contains("+ ?") && namespaceResult.value(.hitRate) == "—", "unknown metrics remain partial and incomplete cache ratios stay unknown")
+check(migrated.notesExpanded == nil && migrated.overview == nil, "new UI preferences preserve old settings with collapsed notes and overview defaults")
+print("\(passed) final checks including all-history overview passed")

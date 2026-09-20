@@ -24,6 +24,30 @@ class Accounting(unittest.TestCase):
         c.execute('INSERT INTO threads VALUES(?,?,?,?,1,?,1)',('child','Child','Child',str(child),'/root/child'))
         c.executescript("INSERT INTO thread_spawn_edges VALUES('root','child','closed'),('child','root','open');");c.commit();c.close()
         return Catalog(home=self.home).tasks()[0]
+    def test_overview_all_history(self):
+        import all_usage
+        task=self.family();c=sqlite3.connect(task['database'])
+        for i in range(45):c.execute("INSERT INTO threads VALUES(?,?,?,?,1,'/root/old',0)",(f'old{i}','old','old',task['path']))
+        c.commit();c.close();catalog=Catalog(home=self.home)
+        self.assertEqual(len(catalog.tasks(all_history=True)),47)
+        reader=all_usage.AllUsageReader(catalog)
+        s=reader.poll()
+        while s['loaded']<s['count']:s=reader.poll()
+        self.assertEqual(s['total']['input'],400*46+500)
+        self.assertEqual(reader.poll(True)['total'],s['total'])
+        Path(task['path']).unlink();s=reader.poll(True)
+        while s['loaded']<s['count']:s=reader.poll()
+        self.assertEqual(s['total']['input'],500);self.assertIn('+ ?',all_usage.value(s,'input'))
+    def test_overview_namespaces_partial_cost(self):
+        import all_usage
+        from pricing import cost,unknown
+        a=dict(id='same',source='codex');b=dict(id='same',source='bridge:other')
+        rows={'codex:same':dict(tokens=dict(ZERO,input=100,output=5,cached=80),cost=cost(1)),
+              'bridge:other:same':dict(tokens=None,cost=unknown('missing'))}
+        s=all_usage.summary([a,a,b],rows)
+        self.assertEqual(s['count'],2);self.assertEqual(s['cost']['usd'],1)
+        self.assertFalse(s['cost']['complete']);self.assertEqual(all_usage.token_label(s),'105 + ?')
+        self.assertEqual(all_usage.summary([],rows)['count'],0)
     def test_duplicate_cumulative(self):
         task=self.family();s=codex_family(task)
         self.assertEqual(s['total']['input'],900);self.assertEqual(len(s['members']),2)

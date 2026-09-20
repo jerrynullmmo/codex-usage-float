@@ -293,7 +293,7 @@ class Catalog:
     def bridges(self):
         pairs = [(p,d) for p in sorted(self.adapter_dir.glob('*.json'))[:32] if (d := read_bridge(p))]
         return [(p,d) for p,d in pairs if sum(x['id'] == d['id'] for _,x in pairs) == 1]
-    def tasks(self, source=None):
+    def tasks(self, source=None, all_history=False, strict=False):
         result = []
         if source in (None,'codex'):
             paths = [p for p in (self.home/'.codex').glob('state_*.sqlite') if re.fullmatch(r'state_\d+\.sqlite', p.name)]
@@ -301,20 +301,22 @@ class Catalog:
                 path = max(paths, key=lambda p:int(re.search(r'\d+', p.name)[0]))
                 try:
                     with database(path) as db:
-                        for r in rows(db,"SELECT id,COALESCE(NULLIF(name,''),title) AS title,rollout_path AS path FROM threads WHERE archived=0 AND (agent_path IS NULL OR agent_path='/root') ORDER BY updated_at DESC LIMIT 40"):
+                        for r in rows(db,"SELECT id,COALESCE(NULLIF(name,''),title) AS title,rollout_path AS path FROM threads "+("ORDER BY updated_at DESC" if all_history else "WHERE archived=0 AND (agent_path IS NULL OR agent_path='/root') ORDER BY updated_at DESC LIMIT 40")):
                             result.append(dict(r,source='codex',database=str(path)))
-                except (sqlite3.Error,OSError): pass
+                except (sqlite3.Error,OSError,ValueError) as error:
+                    if strict:raise RuntimeError("无法读取任务目录") from error
         if source in (None,'opencode'):
             path = self.home/'.local/share/opencode/opencode.db'
             if path.exists():
                 try:
                     with database(path) as db:
-                        for r in rows(db,'SELECT id,title FROM session WHERE parent_id IS NULL AND time_archived IS NULL ORDER BY time_updated DESC LIMIT 40'):
+                        for r in rows(db,'SELECT id,title FROM session '+('' if all_history else 'WHERE parent_id IS NULL AND time_archived IS NULL ORDER BY time_updated DESC LIMIT 40')):
                             result.append(dict(r,source='opencode',path=str(path)))
-                except (sqlite3.Error,OSError): pass
+                except (sqlite3.Error,OSError,ValueError) as error:
+                    if strict:raise RuntimeError("无法读取任务目录") from error
         for path, doc in self.bridges():
             if source is not None and source != 'bridge:' + doc['id']: continue
-            result.extend(dict(id=s['id'],title=s['title'],source='bridge:'+doc['id'],path=str(path)) for s in doc['sessions'] if not s.get('parentID'))
+            result.extend(dict(id=s['id'],title=s['title'],source='bridge:'+doc['id'],path=str(path)) for s in doc['sessions'] if all_history or not s.get('parentID'))
         return result
     def exact_tasks(self, source, titles):
         # Selection searches all history; the recent-task menu is not a uniqueness index.

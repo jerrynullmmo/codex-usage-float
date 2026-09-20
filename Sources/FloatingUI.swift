@@ -78,21 +78,30 @@ final class MonitorView: NSView {
             text(owner.compactLabel, 27, 9, 107, size: 12, weight: .semibold, mono: true)
             return
         }
-        text(owner.snapshot.sourceName + " 用量", 18, 17, 130, size: 15, weight: .semibold)
+        text((owner.overview ? "AI" : owner.snapshot.sourceName) + " 用量", 18, 17, 130, size: 15, weight: .semibold)
         button(owner.pinned ? "已固定" : "固定", NSRect(x: 268, y: 12, width: 56, height: 28)) { [weak owner] in owner?.togglePin() }
         button("设置", NSRect(x: 332, y: 12, width: 56, height: 28)) { [weak owner, weak self] in
             guard let self else { return }; owner?.showMenu(at: NSPoint(x: 330, y: 42), in: self)
         }
-        rect(NSRect(x: 16, y: 52, width: 374, height: 57), NSColor.white.withAlphaComponent(0.045), radius: 9)
-        text(owner.selected?.title ?? owner.focusReport.title ?? "等待识别当前对话", 26, 61, 326, size: 12, weight: .medium)
-        text("⌄", 360, 61, 18, size: 13, color: muted)
-        text(owner.followsCurrent ? owner.focusReport.message : "手动选择 · 已暂停自动跟随", 26, 84, 347, size: 10, color: owner.followsCurrent && owner.selected != nil ? accent : NSColor(srgbRed: 0.86, green: 0.71, blue: 0.45, alpha: 1))
-        actions.append((NSRect(x: 16, y: 52, width: 374, height: 57), { [weak owner, weak self] in
-            guard let self else { return }; owner?.showThreadMenu(at: NSPoint(x: 18, y: 110), in: self)
+        button((owner.overview ? "● " : "") + "全部累计", NSRect(x: 16, y: 52, width: 183, height: 28)) { [weak owner] in owner?.setOverview(true) }
+        button((owner.overview ? "" : "● ") + "当前对话", NSRect(x: 207, y: 52, width: 183, height: 28)) { [weak owner] in owner?.setOverview(false) }
+        var y: CGFloat = 184
+        if owner.overview {
+            text("本机全部已接入记录", 18, 96, 370, size: 13, weight: .semibold)
+            text(owner.allUsage.status, 18, 121, 370, size: 10, color: muted)
+            text("总 Token", 18, 153, 100, size: 11, color: muted)
+            text(owner.allUsage.tokenLabel, 125, 148, 263, size: 19, color: accent, weight: .semibold, mono: true, align: .right)
+        } else {
+        rect(NSRect(x: 16, y: 92, width: 374, height: 57), NSColor.white.withAlphaComponent(0.045), radius: 9)
+        text(owner.selected?.title ?? owner.focusReport.title ?? "等待识别当前对话", 26, 101, 326, size: 12, weight: .medium)
+        text("⌄", 360, 101, 18, size: 13, color: muted)
+        text(owner.followsCurrent ? owner.focusReport.message : "手动选择 · 已暂停自动跟随", 26, 124, 347, size: 10, color: owner.followsCurrent && owner.selected != nil ? accent : NSColor(srgbRed: 0.86, green: 0.71, blue: 0.45, alpha: 1))
+        actions.append((NSRect(x: 16, y: 92, width: 374, height: 57), { [weak owner, weak self] in
+            guard let self else { return }; owner?.showThreadMenu(at: NSPoint(x: 18, y: 150), in: self)
         }))
-        text("套餐快照" + (owner.snapshot.plan.map { " · " + $0.uppercased() } ?? ""), 18, 122, 210, size: 10, color: muted, weight: .medium)
-        text(owner.ageLabel(owner.snapshot.quotaUpdatedAt), 230, 122, 158, size: 10, color: muted, align: .right)
-        var y: CGFloat = 144
+        text("套餐快照" + (owner.snapshot.plan.map { " · " + $0.uppercased() } ?? ""), 18, 162, 210, size: 10, color: muted, weight: .medium)
+        text(owner.ageLabel(owner.snapshot.quotaUpdatedAt), 230, 162, 158, size: 10, color: muted, align: .right)
+        y = 184
         if owner.snapshot.windows.isEmpty {
             text("暂无套餐额度记录", 18, y, 355, size: 13, color: muted); y += 44
         } else {
@@ -106,36 +115,50 @@ final class MonitorView: NSView {
                 y += 62
             }
         }
+        }
         y += 4
         rect(NSRect(x: 18, y: y, width: 370, height: 1), NSColor.white.withAlphaComponent(0.08)); y += 14
         text("TOKEN", 18, y, 84, size: 10, color: muted, weight: .semibold)
-        for (label, x) in [("任务合计", CGFloat(108)), ("本轮", CGFloat(204)), ("主任务最近", CGFloat(298))] {
+        for (label, x) in (owner.overview ? [("全部对话累计", CGFloat(298))] : [("任务合计", CGFloat(108)), ("本轮", CGFloat(204)), ("主任务最近", CGFloat(298))]) {
             text(label, x, y, 90, size: 10, color: muted, align: .right)
         }
         y += 24
         for (i, metric) in owner.settings.metrics.enumerated() {
             if i % 2 == 0 { rect(NSRect(x: 12, y: y - 4, width: 382, height: 29), NSColor.white.withAlphaComponent(0.025), radius: 5) }
             text(metric.label, 18, y, 92, size: 11, color: muted)
+            if owner.overview {
+                text(owner.allUsage.value(metric), 135, y, 253, size: 12, color: .white, mono: true, align: .right)
+            } else {
             for (tokens, x) in [(owner.snapshot.total, CGFloat(108)), (owner.snapshot.round, CGFloat(204)), (owner.snapshot.last, CGFloat(298))] {
                 text(metric.value(tokens), x, y, 90, size: 11, color: metric == .input || metric == .output ? .white : muted, mono: true, align: .right)
+            }
             }
             y += 29
         }
         y += 8
         text("API 估算 USD", 18, y, 92, size: 10, color: accent)
-        for (cost, x) in [(owner.snapshot.costTotal, CGFloat(108)), (owner.snapshot.costRound, CGFloat(204)), (owner.snapshot.costLast, CGFloat(298))] {
-            text(cost?.label ?? "—", x, y, 90, size: 10, color: accent, mono: true, align: .right)
+        if owner.overview {
+            text(owner.allUsage.cost.label, 135, y - 2, 253, size: 14, color: accent, mono: true, align: .right)
+        } else {
+            for (cost, x) in [(owner.snapshot.costTotal, CGFloat(108)), (owner.snapshot.costRound, CGFloat(204)), (owner.snapshot.costLast, CGFloat(298))] {
+                text(cost?.label ?? "—", x, y, 90, size: 10, color: accent, mono: true, align: .right)
+            }
         }
-        y += 24
-        text(PriceBook.shared.label + " · Standard 参考价", 18, y, 371, size: 9, color: muted); y += 16
-        text("非实际扣费；+ ? 为部分金额。明细见设置。", 18, y, 371, size: 9, color: muted); y += 20
-        text("输入含缓存；输出含推理，勿重复相加。", 18, y, 371, size: 10, color: muted); y += 18
-        text("— 表示未提供或不完整；0 为数据源上报值。", 18, y, 371, size: 10, color: muted); y += 18
-        text(owner.snapshot.scopeNote, 18, y, 371, size: 10, color: muted); y += 25
+        y += 25
+        text(owner.overview ? "仅本机记录 · 未同步设备与已删除历史不在内" : "官方 API 参考估算 · 非实际扣费", 18, y, 370, size: 9, color: muted); y += 23
+        button(owner.notesExpanded ? "▾ 收起说明" : "▸ 展开说明", NSRect(x: 18, y: y, width: 110, height: 25)) { [weak owner] in owner?.toggleNotes() }
+        y += 34
+        if owner.notesExpanded {
+            text(PriceBook.shared.label + " · Standard 参考价", 18, y, 371, size: 9, color: muted); y += 17
+            text("非实际扣费；+ ? 表示仅已知部分。明细见设置。", 18, y, 371, size: 9, color: muted); y += 17
+            text("总 Token = 输入 + 输出；缓存、推理已包含。", 18, y, 371, size: 10, color: muted); y += 18
+            text("— 表示未知；0 为上报值。每个任务只计一次。", 18, y, 371, size: 10, color: muted); y += 18
+            text(owner.overview ? "按会话记录累计；分叉继承的历史可能重叠。" : owner.snapshot.scopeNote, 18, y, 371, size: 9, color: muted); y += 20
+        }
         rect(NSRect(x: 18, y: y, width: 370, height: 1), NSColor.white.withAlphaComponent(0.08)); y += 12
-        let status = owner.snapshot.error ?? (owner.loading ? "正在读取记录…" : (owner.snapshot.running ? "任务执行中" : "等待下一轮"))
+        let status = owner.overview ? (owner.allUsage.issues.first ?? owner.allUsage.status) : owner.snapshot.error ?? (owner.loading ? "正在读取记录…" : (owner.snapshot.running ? "任务执行中" : "等待下一轮"))
         text(status, 18, y, 220, size: 10, color: owner.snapshot.error == nil ? accent : .systemOrange)
-        text(owner.ageLabel(owner.snapshot.updatedAt), 220, y, 168, size: 10, color: muted, align: .right)
+        text(owner.ageLabel(owner.overview ? owner.allUsage.updatedAt : owner.snapshot.updatedAt), 220, y, 168, size: 10, color: muted, align: .right)
     }
 }
 
@@ -146,6 +169,25 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let cardView = MonitorView(detail: true)
     var settings = Settings.load()
     var snapshot = UsageSnapshot()
+    var allUsage = AllUsageSummary()
+    var overview: Bool { settings.overview ?? true }
+    var notesExpanded: Bool { settings.notesExpanded ?? false }
+    private let allReader = AllUsageReader()
+    private let allQueue = DispatchQueue(label: "com.yonshore.codex-usage.all", qos: .utility)
+    private var readingAll = false
+    private var allTimer: Timer?
+    func setOverview(_ value: Bool) { settings.overview = value; save() }
+    func toggleNotes() { settings.notesExpanded = !notesExpanded; save() }
+    private func refreshAll() {
+        guard !readingAll, !uiTest else { return }
+        readingAll = true
+        allQueue.async { [weak self] in
+            guard let self else { return }; let value = self.allReader.poll()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }; self.readingAll = false; self.allUsage = value; self.repaint()
+            }
+        }
+    }
     var selected: ThreadEntry?
     var recent: [ThreadEntry] = []
     var loading = false
@@ -243,6 +285,8 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hoverTimer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
         readTimer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.main.add(hoverTimer!, forMode: .common); RunLoop.main.add(readTimer!, forMode: .common)
+        allTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.refreshAll() }
+        refreshAll()
         tick()
         if uiTest { runUITest() }
     }
@@ -336,7 +380,7 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if pinned { showCard() } else { card.orderOut(nil) }
         repaint()
     }
-    private func cardHeight() -> CGFloat { 358 + CGFloat(max(1, snapshot.windows.count)) * 62 + CGFloat(settings.metrics.count) * 29 - (snapshot.windows.isEmpty ? 18 : 0) }
+    private func cardHeight() -> CGFloat { (overview ? 350 : 375 + CGFloat(max(1, snapshot.windows.count)) * 62 - (snapshot.windows.isEmpty ? 18 : 0)) + CGFloat(settings.metrics.count) * 29 + (notesExpanded ? 90 : 0) }
     func showCard() {
         placeCard(); if !card.isVisible { card.orderFrontRegardless() }; cardView.needsDisplay = true
     }
@@ -438,7 +482,7 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSWorkspace.shared.open(UsageBridge.directory)
         })
         let prices = NSMenuItem(title: "API 费用明细与价目", action: nil, keyEquivalent: ""); prices.submenu = NSMenu()
-        for (title, value) in [("任务合计", snapshot.costTotal), ("本轮", snapshot.costRound), ("最近调用", snapshot.costLast)] {
+        for (title, value) in [("全部累计", Optional(allUsage.cost)), ("任务合计", snapshot.costTotal), ("本轮", snapshot.costRound), ("最近调用", snapshot.costLast)] {
             prices.submenu?.addItem(NSMenuItem(title: title + "：" + (value?.label ?? "—"), action: nil, keyEquivalent: ""))
             for reason in value?.reasons ?? [] { prices.submenu?.addItem(NSMenuItem(title: "  " + reason, action: nil, keyEquivalent: "")) }
         }
@@ -512,6 +556,14 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             checks["card_on_screen"] = screenForPill().contains(card.frame)
             checks["card_does_not_cover_pill"] = !card.frame.intersects(pill.frame)
             checks["live_tokens_loaded"] = snapshot.total?.input != nil
+            settings.overview = true; settings.notesExpanded = false; showCard(); cardView.display()
+            let collapsedHeight = card.frame.height
+            checks["overview_default_has_two_tabs"] = cardView.actions.count >= 5
+            toggleNotes(); showCard(); checks["notes_expand_height"] = card.frame.height == collapsedHeight + 90
+            capture(cardView, name: "all-expanded.png")
+            toggleNotes(); checks["notes_collapse_height"] = card.frame.height == collapsedHeight
+            capture(cardView, name: "all-collapsed.png")
+            setOverview(false); checks["task_view_preserved"] = !overview
             let originalSnapshot = snapshot
             checks["packaged_price_catalog_loaded"] = PriceBook.shared.document?.models.count == 50
             let originalCompact = settings.compact

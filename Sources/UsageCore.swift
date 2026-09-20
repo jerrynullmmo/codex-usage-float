@@ -266,6 +266,8 @@ enum Metric: String, Codable, CaseIterable {
 
 struct Settings: Codable {
     // Optional so existing preferences migrate without losing position or metric choices.
+    var overview: Bool?
+    var notesExpanded: Bool?
     var autoFollow: Bool?
     var threadID: String?
     var sourceID: String?

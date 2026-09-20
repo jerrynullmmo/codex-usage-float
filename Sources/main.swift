@@ -12,6 +12,16 @@ if let path = argument("--bridge-check") {
     let data = try! JSONEncoder().encode(report)
     print(String(decoding: data, as: UTF8.self))
     if let path = argument("--diagnostic-output") { try? data.write(to: URL(fileURLWithPath: path), options: .atomic) }
+} else if args.contains("--all-snapshot") {
+    let reader = AllUsageReader(); let deadline = Date().addingTimeInterval(180)
+    var snapshot = reader.poll()
+    var reported = Date.distantPast
+    while snapshot.loaded < snapshot.count && Date() < deadline {
+        snapshot = reader.poll()
+        if Date().timeIntervalSince(reported) > 10 { fputs("汇总 \(snapshot.loaded)/\(snapshot.count)\n", stderr); reported = Date() }
+    }
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let bytes = try? encoder.encode(snapshot) { print(String(decoding: bytes, as: UTF8.self)) }
 } else if let thread = argument("--snapshot") {
     if let entry = UsageSources().read(id: thread, source: argument("--source") ?? "codex") {
         let snapshot = UsageSources().reader(for: entry, includeChildren: !args.contains("--root-only")).poll()

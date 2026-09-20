@@ -13,6 +13,7 @@ import time
 from types import SimpleNamespace
 import tkinter as tk
 import pricing
+import all_usage
 from usage_core import Catalog, FIELDS, blank, date, same_focus, same_task
 
 LABELS = dict(input='输入',output='输出',cached='缓存读取',written='缓存写入',reasoning='推理输出')
@@ -80,6 +81,9 @@ class FloatApp:
             wanted=self.settings['selection'];self.selected=next((t for t in self.catalog.tasks(wanted.get('source')) if t['id']==wanted.get('id')),None)
         self.include_children=self.settings.get('includeSubagents',True); self.hidden=False; self.menu_open=False; self.tray_visible=False
         self.executor=ThreadPoolExecutor(max_workers=1); self.future=None; self.last_poll=0; self.last_read=0; self.last_key=None
+        self.all_usage=all_usage.summary()
+        self.all_reader=all_usage.AllUsageReader(Catalog(adapter_dir=self.folder/'adapters'),self.folder/'all-usage-cache.json')
+        self.all_executor=ThreadPoolExecutor(max_workers=1);self.all_future=None;self.last_all=0
         self.drag=None; self.dragged=False
         self.canvas.bind('<ButtonPress-1>',self.press); self.canvas.bind('<B1-Motion>',self.move); self.canvas.bind('<ButtonRelease-1>',self.release)
         self.canvas.bind('<Button-3>',self.menu)
@@ -97,8 +101,13 @@ class FloatApp:
         self.folder.mkdir(parents=True,exist_ok=True)
         target=self.folder/'settings.json'; temp=target.with_suffix('.tmp')
         temp.write_text(json.dumps(self.settings,ensure_ascii=False),encoding='utf-8'); temp.replace(target)
+    @property
+    def overview(self):return self.settings.get('overview',True)
+    @property
+    def notes_expanded(self):return self.settings.get('notesExpanded',False)
+    def detail_height(self):return (390 if self.overview else 444)+27*len([k for k in self.settings.get('metrics',list(FIELDS)) if k in FIELDS])+(100 if self.notes_expanded else 0)
     def geometry(self):
-        width,height = (480,580) if self.expanded else (160,36)
+        width,height = (480,self.detail_height()) if self.expanded else (160,36)
         x=max(0,min(self.anchor[0],self.root.winfo_screenwidth()-width))
         y=max(0,min(self.anchor[1],self.root.winfo_screenheight()-height-40))
         self.root.geometry(f'{width}x{height}+{x}+{y}')
@@ -144,6 +153,12 @@ class FloatApp:
         self.show(not self.hidden and (self.test or not self.auto or supported or self.menu_open or self.tray_visible))
         self.draw(); return True
     def tick(self):
+        if self.all_future and self.all_future.done():
+            try:self.all_usage=self.all_future.result();self.draw()
+            except Exception:self.all_usage['issues']=['暂时无法读取全部用量']
+            self.all_future=None
+        if not self.test and self.all_future is None and time.monotonic()-self.last_all>=.5:
+            self.last_all=time.monotonic();self.all_future=self.all_executor.submit(self.all_reader.poll)
         if self.future and self.future.done():
             try:self.accept(self.future.result())
             except Exception:self.snapshot=blank('AI');self.snapshot['error']='暂时无法读取用量';self.draw()
@@ -172,38 +187,67 @@ class FloatApp:
                 key=self.settings.get('compact','input');v=(self.snapshot.get('total') or {}).get(key)
                 label=('累计入 ' if key=='input' else '累计出 ')+(formatted(v) if v is None or v<1000 else f'{v/1000:.1f}k')
             text(27,7,label,11,'#ffffff');return
-        text(18,15,self.snapshot['sourceName']+' 用量',15,'#ffffff');text(336,19,'已固定' if self.pinned else '点击固定',10,accent);text(420,19,'设置',10,accent)
-        c.create_rectangle(16,54,464,110,fill='#20262b',outline='')
-        title=(self.selected or {}).get('title','等待识别当前对话')
-        text(26,62,title[:44],11,'#ffffff')
-        text(26,86,'自动跟随 · 仅确认当前任务后显示' if self.auto else '手动选择 · 已暂停自动跟随',9,accent)
-        quota=self.snapshot['windows']; text(18,125,'套餐快照'+(' · '+self.snapshot['plan'] if self.snapshot.get('plan') else ''),10)
-        y=151
-        if not quota:text(18,y,'暂无套餐额度记录',11)
+        text(18,15,('AI' if self.overview else self.snapshot['sourceName'])+' 用量',15,'#ffffff');text(336,19,'已固定' if self.pinned else '点击固定',10,accent);text(420,19,'设置',10,accent)
+        for x,label,active in [(16,'全部累计',self.overview),(248,'当前对话',not self.overview)]:
+            c.create_rectangle(x,52,x+216,82,fill='#273139' if active else '#20262b',outline='')
+            text(x+70,57,label,10,accent if active else '#99a7b2')
+        if self.overview:
+            text(18,99,'本机全部已接入记录',12,'#ffffff')
+            text(18,125,all_usage.status(self.all_usage),10)
+            text(18,158,'总 Token',11)
+            text(462,154,all_usage.token_label(self.all_usage),17,accent,'ne')
+            y=197
         else:
-            for w in quota[:2]:
-                expired=w.get('resets') and w['resets']<=time.time();minutes=w.get('minutes',0)
-                label='每周' if minutes==10080 else f'{minutes//60} 小时' if minutes%60==0 else f'{minutes} 分钟'
-                text(18,y,label+'额度',11);text(458,y,'待更新' if expired else f"剩余 {max(0,100-w['used']):.0f}%",12,accent,'ne');y+=24
-        text(18,211,'TOKEN',9);text(260,211,'任务合计',9,anchor='ne');text(360,211,'本轮',9,anchor='ne');text(462,211,'主任务最近',9,anchor='ne')
-        y=239
+            c.create_rectangle(16,94,464,150,fill='#20262b',outline='')
+            title=(self.selected or {}).get('title','等待识别当前对话')
+            text(26,102,title[:44],11,'#ffffff')
+            text(26,126,'自动跟随 · 仅确认当前任务后显示' if self.auto else '手动选择 · 已暂停自动跟随',9,accent)
+            quota=self.snapshot['windows']; text(18,165,'套餐快照'+(' · '+self.snapshot['plan'] if self.snapshot.get('plan') else ''),10)
+            y=191
+            if not quota:text(18,y,'暂无套餐额度记录',11)
+            else:
+                for w in quota[:2]:
+                    expired=w.get('resets') and w['resets']<=time.time();minutes=w.get('minutes',0)
+                    label='每周' if minutes==10080 else f'{minutes//60} 小时' if minutes%60==0 else f'{minutes} 分钟'
+                    text(18,y,label+'额度',11);text(458,y,'待更新' if expired else f"剩余 {max(0,100-w['used']):.0f}%",12,accent,'ne');y+=24
+            y=251
+        text(18,y,'TOKEN',9)
+        if self.overview:text(462,y,'全部对话累计',9,anchor='ne')
+        else:
+            text(260,y,'任务合计',9,anchor='ne');text(360,y,'本轮',9,anchor='ne');text(462,y,'主任务最近',9,anchor='ne')
+        y+=28
         metrics=self.settings.get('metrics',list(FIELDS))
         for k in metrics:
             if k not in FIELDS:continue
             text(18,y,LABELS[k],10)
-            for key,x in [('total',260),('round',360),('last',462)]:text(x,y,formatted((self.snapshot.get(key) or {}).get(k)),10,'#ffffff','ne')
+            if self.overview:text(462,y,all_usage.value(self.all_usage,k),11,'#ffffff','ne')
+            else:
+                for key,x in [('total',260),('round',360),('last',462)]:text(x,y,formatted((self.snapshot.get(key) or {}).get(k)),10,'#ffffff','ne')
             y+=27
-        total=self.snapshot.get('total') or {}; rate=total.get('cached')/total['input']*100 if total.get('input') and total.get('cached') is not None and total['cached']<=total['input'] else None
-        text(18,y,'合计缓存命中',10);text(462,y,'—' if rate is None else f'{rate:.1f}%',10,anchor='ne')
-        text(18,411,'API 估算 USD',10,accent)
-        for key,x in [('costTotal',260),('costRound',360),('costLast',462)]:text(x,411,pricing.label(self.snapshot.get(key)),10,accent,'ne')
-        text(18,437,pricing.BOOK.title+' · Standard 参考价',9)
-        text(18,457,'非实际扣费；+ ? 为部分金额；明细见设置。',9)
-        text(18,481,'输入含缓存；输出含推理；— 表示未知。',9)
-        text(18,503,self.snapshot['scopeNote'][:48],9)
-        text(18,540,(self.snapshot['error'] or ('任务执行中' if self.snapshot['running'] else '等待下一轮'))[:48],9,accent)
-        stamp=date(self.snapshot.get('updatedAt'));text(462,560,'未上报' if stamp is None else f'{max(0,int(time.time()-stamp))} 秒前更新',8,anchor='ne')
+        total=(self.all_usage['total'] if self.overview else self.snapshot.get('total')) or {}
+        rate=total.get('cached')/total['input']*100 if total.get('input') and total.get('cached') is not None and total['cached']<=total['input'] else None
+        if self.overview and (self.all_usage['missing']['input'] or self.all_usage['missing']['cached']):rate=None
+        text(18,y,'合计缓存命中',10);text(462,y,'—' if rate is None else f'{rate:.1f}%',10,anchor='ne');y+=32
+        text(18,y,'API 估算 USD',10,accent)
+        if self.overview:text(462,y,pricing.label(self.all_usage['cost']),12,accent,'ne')
+        else:
+            for key,x in [('costTotal',260),('costRound',360),('costLast',462)]:text(x,y,pricing.label(self.snapshot.get(key)),10,accent,'ne')
+        y+=28
+        text(18,y,'仅本机记录 · 未同步设备与已删除历史不在内' if self.overview else '官方 API 参考估算 · 非实际扣费',9);y+=26
+        self.notes_y=y
+        text(18,y,'▾ 收起说明' if self.notes_expanded else '▸ 展开说明',10,accent);y+=32
+        if self.notes_expanded:
+            for line in [pricing.BOOK.title+' · Standard 参考价','非实际扣费；+ ? 表示仅已知部分；明细见设置。','总 Token = 输入 + 输出；缓存、推理已包含。','— 表示未知；0 为上报值。每个任务只计一次。','按会话记录累计；分叉继承的历史可能重叠。' if self.overview else self.snapshot['scopeNote'][:48]]:
+                text(18,y,line,9);y+=20
+        status=(self.all_usage['issues'] or [all_usage.status(self.all_usage)])[0] if self.overview else self.snapshot['error'] or ('任务执行中' if self.snapshot['running'] else '等待下一轮')
+        text(18,y,status[:48],9,accent);y+=22
+        stamp=date(self.all_usage.get('updatedAt') if self.overview else self.snapshot.get('updatedAt'))
+        text(462,y,'未上报' if stamp is None else f'{max(0,int(time.time()-stamp))} 秒前更新',8,anchor='ne')
     def press(self,event):
+        if self.expanded and 52<=event.y<=82:
+            self.preference('overview',event.x<240);return
+        if self.expanded and self.notes_y<=event.y<=self.notes_y+26 and event.x<150:
+            self.preference('notesExpanded',not self.notes_expanded);return
         if self.expanded and event.y<50 and event.x>=400:self.menu(event);return
         self.drag=(event.x_root,event.y_root,self.anchor);self.dragged=False
     def move(self,event):
@@ -241,6 +285,8 @@ class FloatApp:
             members.add_cascade(label=member['title'][:32],menu=sub)
         menu.add_cascade(label='查看各任务明细',menu=members)
         prices=tk.Menu(menu,tearoff=False)
+        prices.add_command(label='全部累计：'+pricing.label(self.all_usage['cost']),state='disabled')
+        for reason in self.all_usage['cost'].get('reasons',[]):prices.add_command(label=reason,state='disabled')
         for key,title in [('costTotal','任务合计'),('costRound','本轮'),('costLast','最近调用')]:
             value=self.snapshot.get(key)
             prices.add_command(label=title+'：'+pricing.label(value),state='disabled')
@@ -276,8 +322,8 @@ class FloatApp:
         self.menu_open=True
         try:menu.tk_popup(event.x_root,event.y_root)
         finally:menu.grab_release();self.menu_open=False;self.outside_since=time.monotonic()
-    def preference(self,key,value):self.settings[key]=value;self.save();self.draw()
-    def quit(self):self.tray.close();self.executor.shutdown(wait=False,cancel_futures=True);self.root.destroy()
+    def preference(self,key,value):self.settings[key]=value;self.save();self.geometry();self.draw()
+    def quit(self):self.tray.close();self.executor.shutdown(wait=False,cancel_futures=True);self.all_executor.shutdown(wait=False,cancel_futures=True);self.root.destroy()
     def ui_test(self,output):
         before=self.user32.GetForegroundWindow();checks={}
         self.show(True);self.root.update()
@@ -294,6 +340,12 @@ class FloatApp:
         checks['late_result_rejected']=not self.accept((old,None,blank('AI'),None))
         checks['interactive_desktop']=bool(before)
         checks['packaged_price_catalog_loaded']=pricing.BOOK.document is not None and len(pricing.BOOK.document['models'])==50
+        self.preference('overview',True);self.preference('notesExpanded',False)
+        h=self.detail_height();checks['all_tab_rendered']=any(self.canvas.itemcget(i,'text')=='本机全部已接入记录' for i in self.canvas.find_all() if self.canvas.type(i)=='text')
+        self.press(SimpleNamespace(x=30,y=self.notes_y+5));checks['notes_expand']=self.notes_expanded and self.detail_height()==h+100
+        self.release(None);checks['notes_dont_toggle_pin']=self.pinned
+        self.press(SimpleNamespace(x=30,y=self.notes_y+5));checks['notes_collapse']=not self.notes_expanded and self.detail_height()==h
+        self.press(SimpleNamespace(x=300,y=65));checks['task_tab_preserved']=not self.overview
         self.snapshot['costTotal']=pricing.cost(1.2345);self.draw()
         checks['cost_row_rendered']=any(self.canvas.itemcget(i,'text')=='$1.2345' for i in self.canvas.find_all() if self.canvas.type(i)=='text')
         Path(output).write_text(json.dumps(checks,indent=2),encoding='utf-8')
