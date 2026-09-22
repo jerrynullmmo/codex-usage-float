@@ -9,7 +9,7 @@ xcrun --find swiftc >/dev/null
 version="$(<VERSION)"
 app="$PWD/build/Codex Usage Float.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 Sources/UsageCore.swift Sources/Pricing.swift Sources/FamilyUsage.swift Sources/OpenCodeUsage.swift Sources/UsageSources.swift Sources/AllUsage.swift Sources/ActiveConversation.swift Sources/FloatingUI.swift Sources/main.swift -o "$app/Contents/MacOS/CodexUsageFloat"
+swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 Sources/UsageCore.swift Sources/Pricing.swift Sources/FamilyUsage.swift Sources/OpenCodeUsage.swift Sources/UsageSources.swift Sources/AllUsage.swift Sources/YonshoreAccount.swift Sources/ActiveConversation.swift Sources/FloatingUI.swift Sources/main.swift -o "$app/Contents/MacOS/CodexUsageFloat"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -33,6 +33,5 @@ mkdir -p "$app/Contents/Resources/docs"
 cp docs/ADAPTERS.md "$app/Contents/Resources/docs/ADAPTERS.md"
 mkdir -p "$app/Contents/Resources/windows"
 cp windows/README.md "$app/Contents/Resources/windows/README.md"
-codesign --force --sign - "$app"
-codesign --verify --deep --strict "$app"
+zsh scripts/sign.sh "$app"
 print -r -- "$app"

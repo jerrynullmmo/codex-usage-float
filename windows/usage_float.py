@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import tkinter as tk
 import pricing
 import all_usage
+import yonshore_account
+from tkinter import simpledialog, messagebox
 from usage_core import Catalog, FIELDS, blank, date, same_focus, same_task
 
 LABELS = dict(input='输入',output='输出',cached='缓存读取',written='缓存写入',reasoning='推理输出')
@@ -81,6 +83,8 @@ class FloatApp:
             wanted=self.settings['selection'];self.selected=next((t for t in self.catalog.tasks(wanted.get('source')) if t['id']==wanted.get('id')),None)
         self.include_children=self.settings.get('includeSubagents',True); self.hidden=False; self.menu_open=False; self.tray_visible=False
         self.executor=ThreadPoolExecutor(max_workers=1); self.future=None; self.last_poll=0; self.last_read=0; self.last_key=None
+        self.account_state=yonshore_account.AccountState();self.wallet_generation=0;self.wallet_future=None;self.last_wallet=0
+        self.wallet_executor=ThreadPoolExecutor(max_workers=1)
         self.all_usage=all_usage.summary()
         self.all_reader=all_usage.AllUsageReader(Catalog(adapter_dir=self.folder/'adapters'),self.folder/'all-usage-cache.json')
         self.all_executor=ThreadPoolExecutor(max_workers=1);self.all_future=None;self.last_all=0
@@ -105,7 +109,7 @@ class FloatApp:
     def overview(self):return self.settings.get('overview',True)
     @property
     def notes_expanded(self):return self.settings.get('notesExpanded',False)
-    def detail_height(self):return (390 if self.overview else 444)+27*len([k for k in self.settings.get('metrics',list(FIELDS)) if k in FIELDS])+(100 if self.notes_expanded else 0)
+    def detail_height(self):return (390+(124 if self.settings.get("yonshoreEnabled") else 38) if self.overview else 444)+27*len([k for k in self.settings.get('metrics',list(FIELDS)) if k in FIELDS])+(100 if self.notes_expanded else 0)
     def geometry(self):
         width,height = (480,self.detail_height()) if self.expanded else (160,36)
         x=max(0,min(self.anchor[0],self.root.winfo_screenwidth()-width))
@@ -152,7 +156,46 @@ class FloatApp:
         supported = name in ('codex','chatgpt','opencode') or any(name in [Path(n).stem.lower() for n in d.get('processNames',[])] for _,d in self.catalog.bridges())
         self.show(not self.hidden and (self.test or not self.auto or supported or self.menu_open or self.tray_visible))
         self.draw(); return True
+    def refresh_wallet(self,force=False):
+        if self.test or not self.settings.get('yonshoreEnabled') or self.wallet_future is not None:return
+        if not force and time.monotonic()-self.last_wallet<30:return
+        self.last_wallet=time.monotonic();generation=self.wallet_generation;self.account_state.loading=True
+        def query():
+            try:return generation,yonshore_account.fetch(yonshore_account.SecretStore().load()),None
+            except yonshore_account.AccountError as e:return generation,None,e
+            except Exception:return generation,None,yonshore_account.AccountError('unavailable')
+        self.wallet_future=self.wallet_executor.submit(query)
+    def write_wallet_status(self):
+        if self.test:return
+        try:
+            self.folder.mkdir(parents=True,exist_ok=True)
+            target=self.folder/'yonshore-status.json';temp=target.with_suffix('.tmp')
+            temp.write_text(json.dumps(dict(configured=bool(self.settings.get('yonshoreEnabled')),hasWallet=self.account_state.wallet is not None,updatedAt=self.account_state.updated,error=self.account_state.error),ensure_ascii=False),encoding='utf-8');temp.replace(target)
+        except OSError:pass
+    def connect_yonshore(self):
+        if self.test:return
+        before=self.user32.GetForegroundWindow()
+        key=simpledialog.askstring('连接 YonshoreAPI','输入自己的 API Key。仅查询 api.yonshore.com 的账户余额和累计实扣。\n密钥保存在 Windows 凭据管理器；不调用模型、不充值。\n金额沿用站内 $，不与官方 USD 估算相加。',parent=self.root,show='*')
+        try:
+            if key is None:return
+            yonshore_account.SecretStore().save(key)
+            self.wallet_generation+=1;self.account_state=yonshore_account.AccountState();self.last_wallet=0
+            self.settings['yonshoreEnabled']=True;self.settings['overview']=True;self.save();self.geometry();self.draw();self.refresh_wallet(True)
+        except yonshore_account.AccountError as e:messagebox.showerror('连接未保存',str(e),parent=self.root)
+        finally:
+            key=None
+            if before:
+                self.user32.SetForegroundWindow.argtypes=[wintypes.HWND];self.user32.SetForegroundWindow(before)
+    def disconnect_yonshore(self):
+        self.settings['yonshoreEnabled']=False;self.wallet_generation+=1;self.account_state=yonshore_account.AccountState();self.save();self.geometry();self.draw();self.write_wallet_status()
+        try:yonshore_account.SecretStore().remove()
+        except yonshore_account.AccountError:messagebox.showerror('已停止查询','系统未允许移除密钥，请在凭据管理器删除 AI Usage Float/YonshoreAPI 条目。',parent=self.root)
     def tick(self):
+        if self.wallet_future and self.wallet_future.done():
+            generation,wallet,error=self.wallet_future.result();self.wallet_future=None
+            if generation==self.wallet_generation and self.settings.get('yonshoreEnabled'):
+                self.account_state.accept(wallet,error);self.draw();self.write_wallet_status()
+        self.refresh_wallet()
         if self.all_future and self.all_future.done():
             try:self.all_usage=self.all_future.result();self.draw()
             except Exception:self.all_usage['issues']=['暂时无法读取全部用量']
@@ -196,7 +239,16 @@ class FloatApp:
             text(18,125,all_usage.status(self.all_usage),10)
             text(18,158,'总 Token',11)
             text(462,154,all_usage.token_label(self.all_usage),17,accent,'ne')
-            y=197
+            if self.settings.get('yonshoreEnabled'):
+                c.create_rectangle(16,191,464,307,fill='#20262b',outline='')
+                text(26,198,'YonshoreAPI · 账户实扣',11,'#ffffff');text(410,199,'刷新',10,accent)
+                text(26,225,'可用余额（站内 $）',10);text(450,222,yonshore_account.money(self.account_state.wallet.available if self.account_state.wallet else None),12,accent,'ne')
+                text(26,251,'账户累计实际扣费',10);text(450,248,yonshore_account.money(self.account_state.wallet.spent if self.account_state.wallet else None),12,accent,'ne')
+                text(26,284,self.account_state.status[:47],9,'#e8bc75' if self.account_state.error else '#99a7b2')
+                y=321
+            else:
+                c.create_rectangle(16,191,464,221,fill='#273139',outline='');text(64,196,'连接 YonshoreAPI · 余额与实际扣费',10,accent)
+                y=235
         else:
             c.create_rectangle(16,94,464,150,fill='#20262b',outline='')
             title=(self.selected or {}).get('title','等待识别当前对话')
@@ -244,6 +296,9 @@ class FloatApp:
         stamp=date(self.all_usage.get('updatedAt') if self.overview else self.snapshot.get('updatedAt'))
         text(462,y,'未上报' if stamp is None else f'{max(0,int(time.time()-stamp))} 秒前更新',8,anchor='ne')
     def press(self,event):
+        if self.expanded and self.overview and 191<=event.y<=221:
+            if not self.settings.get('yonshoreEnabled'):self.connect_yonshore();return
+            if event.x>=390:self.refresh_wallet(True);return
         if self.expanded and 52<=event.y<=82:
             self.preference('overview',event.x<240);return
         if self.expanded and self.notes_y<=event.y<=self.notes_y+26 and event.x<150:
@@ -284,6 +339,10 @@ class FloatApp:
             for k in FIELDS:sub.add_command(label=f"{LABELS[k]}：{formatted((member.get('total') or {}).get(k))} · 本轮 {formatted((member.get('round') or {}).get(k))}",state='disabled')
             members.add_cascade(label=member['title'][:32],menu=sub)
         menu.add_cascade(label='查看各任务明细',menu=members)
+        menu.add_command(label='更换 YonshoreAPI 连接…' if self.settings.get('yonshoreEnabled') else '连接 YonshoreAPI 余额与实扣…',command=self.connect_yonshore)
+        if self.settings.get('yonshoreEnabled'):
+            menu.add_command(label='刷新 YonshoreAPI 账户',command=lambda:self.refresh_wallet(True))
+            menu.add_command(label='断开 YonshoreAPI 并移除密钥',command=self.disconnect_yonshore)
         prices=tk.Menu(menu,tearoff=False)
         prices.add_command(label='全部累计：'+pricing.label(self.all_usage['cost']),state='disabled')
         for reason in self.all_usage['cost'].get('reasons',[]):prices.add_command(label=reason,state='disabled')
@@ -323,7 +382,7 @@ class FloatApp:
         try:menu.tk_popup(event.x_root,event.y_root)
         finally:menu.grab_release();self.menu_open=False;self.outside_since=time.monotonic()
     def preference(self,key,value):self.settings[key]=value;self.save();self.geometry();self.draw()
-    def quit(self):self.tray.close();self.executor.shutdown(wait=False,cancel_futures=True);self.all_executor.shutdown(wait=False,cancel_futures=True);self.root.destroy()
+    def quit(self):self.tray.close();self.executor.shutdown(wait=False,cancel_futures=True);self.all_executor.shutdown(wait=False,cancel_futures=True);self.wallet_executor.shutdown(wait=False,cancel_futures=True);self.root.destroy()
     def ui_test(self,output):
         before=self.user32.GetForegroundWindow();checks={}
         self.show(True);self.root.update()
@@ -340,7 +399,17 @@ class FloatApp:
         checks['late_result_rejected']=not self.accept((old,None,blank('AI'),None))
         checks['interactive_desktop']=bool(before)
         checks['packaged_price_catalog_loaded']=pricing.BOOK.document is not None and len(pricing.BOOK.document['models'])==50
+        import decimal,ssl,uuid
+        checks['https_runtime_available']=ssl.create_default_context().verify_mode==ssl.CERT_REQUIRED
+        store=yonshore_account.SecretStore('AI Usage Float/Test/'+str(uuid.uuid4()))
+        try:
+            store.save('sk-synthetic-account-test-key');checks['credential_store_roundtrip']=store.load()=='sk-synthetic-account-test-key'
+        finally:store.remove()
         self.preference('overview',True);self.preference('notesExpanded',False)
+        was_enabled=self.settings.get('yonshoreEnabled');self.settings['yonshoreEnabled']=True
+        self.account_state.accept(yonshore_account.Wallet(decimal.Decimal('12.34'),decimal.Decimal('4.56')));self.draw()
+        checks['wallet_values_rendered']=any(self.canvas.itemcget(i,'text')=='$12.34' for i in self.canvas.find_all() if self.canvas.type(i)=='text')
+        self.settings['yonshoreEnabled']=was_enabled;self.account_state=yonshore_account.AccountState();self.draw()
         h=self.detail_height();checks['all_tab_rendered']=any(self.canvas.itemcget(i,'text')=='本机全部已接入记录' for i in self.canvas.find_all() if self.canvas.type(i)=='text')
         self.press(SimpleNamespace(x=30,y=self.notes_y+5));checks['notes_expand']=self.notes_expanded and self.detail_height()==h+100
         self.release(None);checks['notes_dont_toggle_pin']=self.pinned

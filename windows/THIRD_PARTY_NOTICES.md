@@ -1,6 +1,6 @@
 # Windows distribution components
 
-The application's own source is MIT licensed. The standalone Windows build also contains an unmodified Python runtime, Tcl/Tk, SQLite, zlib, libffi and the PyInstaller bootloader. Their license terms remain separate from this project's MIT license.
+The application's own source is MIT licensed. The standalone Windows build also contains an unmodified Python runtime, Tcl/Tk, SQLite, zlib, libffi, OpenSSL and the PyInstaller bootloader. Their license terms remain separate from this project's MIT license.
 
 - Python and the bundled standard-library components: `licenses/Python-LICENSE.txt`, copied from the exact runtime used to build the release. It includes notices for components such as libffi and bzip2.
 - Expat: `licenses/Expat-COPYING.txt`, from CPython 3.13.7 bundled source.
@@ -9,6 +9,7 @@ The application's own source is MIT licensed. The standalone Windows build also 
 - Tcl 8.6.15: `licenses/Tcl-8.6.15-LICENSE.txt`, from the official Tcl source tag.
 - Tk: `licenses/Tk-LICENSE.txt`, copied from the build runtime.
 - zlib: `licenses/zlib-LICENSE.txt`, from the official zlib source repository.
+- OpenSSL 3.0.16: `licenses/OpenSSL-3.0.16-LICENSE.txt`, from the official OpenSSL release tag; used by Python for the opt-in HTTPS account query.
 - SQLite: `licenses/SQLite-NOTICE.txt`, with the upstream public-domain declaration link.
 - PyInstaller: `licenses/PyInstaller-COPYING.txt`, including its bootloader exception, copied from the installed build distribution. The application's MIT source remains available in this repository.
 

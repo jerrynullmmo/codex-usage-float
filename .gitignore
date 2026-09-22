@@ -10,6 +10,9 @@
 *.sqlite-*
 settings.json
 *.log
+*.pem
+*.p12
+*.keychain*
 
 # Windows build/runtime artifacts
 .venv/

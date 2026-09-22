@@ -4,8 +4,10 @@ import importlib.metadata
 import shutil
 import sys
 import tkinter
+import ssl
 
 assert tkinter.Tcl().eval('info patchlevel') == '8.6.15', 'Review Tcl notices before changing the release runtime'
+assert ssl.OPENSSL_VERSION.startswith('OpenSSL 3.0.16 '), 'Review OpenSSL notices before changing the release runtime'
 out=Path(sys.argv[1]);out.mkdir(parents=True,exist_ok=True)
 base=Path(sys.base_prefix)
 shutil.copy2(base/'LICENSE.txt',out/'Python-LICENSE.txt')

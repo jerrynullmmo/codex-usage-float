@@ -262,3 +262,25 @@ check(namespaceResult.count == 2 && namespaceResult.total.input == 10 && namespa
 check(namespaceResult.value(.written).contains("+ ?") && namespaceResult.value(.hitRate) == "—", "unknown metrics remain partial and incomplete cache ratios stay unknown")
 check(migrated.notesExpanded == nil && migrated.overview == nil, "new UI preferences preserve old settings with collapsed notes and overview defaults")
 print("\(passed) final checks including all-history overview passed")
+
+// Synthetic account responses only; tests never use a real key or contact a provider.
+func walletData(_ s: String) -> Data { Data(s.utf8) }
+let walletUsage = walletData("{\"object\":\"list\",\"total_usage\":456}")
+let walletBudget = walletData("{\"object\":\"billing_subscription\",\"hard_limit_usd\":16.9}")
+var walletCalls: [String] = []
+let wallet = try YonshoreClient.read { name in walletCalls.append(name); return name == "usage" ? walletUsage : walletBudget }
+check(wallet.available == Decimal(string:"12.34") && wallet.spent == Decimal(string:"4.56"), "Yonshore available balance and actual charges use cents exactly")
+check(YonshoreWallet.money(wallet.spent) == "$4.56" && YonshoreWallet.money(.zero) == "$0.00" && YonshoreWallet.money(Decimal(string: "-1234.56")) == "$-1,234.56" && YonshoreWallet.money(nil) == "—", "wallet display uses exactly two decimal places and preserves unknown values")
+check(walletCalls == ["usage","subscription","usage"], "account balance is bracketed by consumption reads")
+var sequence = [walletUsage,walletBudget,walletData("{\"object\":\"list\",\"total_usage\":457}"),walletData("{\"object\":\"list\",\"total_usage\":457}"),walletBudget,walletData("{\"object\":\"list\",\"total_usage\":457}")]
+let concurrentWallet = try YonshoreClient.read { _ in sequence.removeFirst() }
+check(concurrentWallet.available == Decimal(string:"12.33"), "concurrent settlement retries a consistent snapshot")
+check((try? YonshoreClient.usage(walletData("{\"error\":{\"message\":\"synthetic secret never exposed\"}}"))) == nil, "HTTP 200 provider errors are not zero balances")
+check((try? YonshoreClient.usage(walletData("{\"object\":\"list\",\"total_usage\":true}"))) == nil, "boolean money is rejected")
+check((try? YonshoreClient.usage(walletData("{\"object\":\"list\",\"total_usage\":0.01}"))) == nil, "fractional cents are rejected")
+check((try? YonshoreClient.subscription(walletData("{\"object\":\"billing_subscription\",\"hard_limit_usd\":12.345}"))) == nil, "unsupported money precision is rejected")
+check((try? yonshoreKey("sk-invalid\r\nkey")) == nil && (try? yonshoreKey("sk-valid-synthetic-key")) != nil, "API key validation rejects whitespace/header injection")
+var walletState = YonshoreAccountState();walletState.accept(.success(wallet));walletState.accept(.failure(.authentication))
+check(walletState.wallet == wallet && walletState.status.contains("上次成功"), "stale account numbers are explicitly marked after an error")
+check(YonshoreAccountState().wallet == nil, "account change begins without another account's figures")
+print("\(passed) final accounting and account checks passed")

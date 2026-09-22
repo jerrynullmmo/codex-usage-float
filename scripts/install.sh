@@ -13,6 +13,13 @@ fi
 codesign --verify --deep --strict "$app"
 destination="$HOME/Applications/Codex Usage Float.app"
 mkdir -p "$HOME/Applications"
+if [[ -e "$destination" ]] && codesign -d --verbose=2 "$destination" 2>&1 | rg -q '^Authority='; then
+  requirement="$(codesign -d -r- "$destination" 2>&1 | sed -n 's/^designated => //p')"
+  if [[ -z "$requirement" ]] || ! codesign --verify --strict -R="$requirement" "$app" 2>/dev/null; then
+    print -u2 -- '新版与已安装版的签名身份不一致，已停止安装以保护现有授权。请使用相同固定签名重新构建。'
+    exit 1
+  fi
+fi
 if [[ -e "$destination" ]]; then
   backup="$HOME/Library/Application Support/Codex Usage Float/backups/$(date +%Y%m%d-%H%M%S)-$$.app"
   ditto "$destination" "$backup"
@@ -20,4 +27,4 @@ if [[ -e "$destination" ]]; then
 fi
 ditto "$app" "$destination"
 print -r -- "已安装：$destination"
-print -- '自动跟随需要辅助功能权限。更新后如果权限失效，请移除旧授权条目并重新添加此应用。'
+print -- '首次切换到固定签名需要重新授权一次；之后使用同一签名与安装路径更新，可沿用辅助功能授权。'

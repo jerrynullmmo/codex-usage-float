@@ -64,6 +64,21 @@ final class MonitorView: NSView {
         text(title, r.minX + 4, r.minY + 5, r.width - 8, size: 11, align: .center)
         actions.append((r, action))
     }
+    private func account(_ owner: MonitorController, y: CGFloat) -> CGFloat {
+        if !owner.walletEnabled {
+            button("连接 YonshoreAPI · 余额与实际扣费", NSRect(x: 16, y: y, width: 374, height: 28)) { [weak owner] in owner?.connectYonshore() }
+            return 38
+        }
+        rect(NSRect(x: 16, y: y, width: 374, height: 104), NSColor.white.withAlphaComponent(0.045), radius: 9)
+        text("YonshoreAPI · 账户实扣", 26, y + 7, 236, size: 12, weight: .semibold)
+        button("刷新", NSRect(x: 327, y: y + 5, width: 52, height: 25)) { [weak owner] in owner?.refreshWallet(force: true) }
+        text("可用余额（站内 $）", 26, y + 34, 180, size: 10, color: .lightGray)
+        text(YonshoreWallet.money(owner.accountState.wallet?.available), 190, y + 31, 188, size: 14, color: owner.accent, mono: true, align: .right)
+        text("账户累计实际扣费", 26, y + 58, 180, size: 10, color: .lightGray)
+        text(YonshoreWallet.money(owner.accountState.wallet?.spent), 190, y + 55, 188, size: 14, color: owner.accent, mono: true, align: .right)
+        text(owner.accountState.status, 26, y + 85, 353, size: 9, color: owner.accountState.error == nil ? .lightGray : .systemOrange)
+        return 114
+    }
     override func draw(_ dirtyRect: NSRect) {
         guard let owner else { return }
         actions.removeAll()
@@ -91,6 +106,7 @@ final class MonitorView: NSView {
             text(owner.allUsage.status, 18, 121, 370, size: 10, color: muted)
             text("总 Token", 18, 153, 100, size: 11, color: muted)
             text(owner.allUsage.tokenLabel, 125, 148, 263, size: 19, color: accent, weight: .semibold, mono: true, align: .right)
+            y += account(owner, y: y)
         } else {
         rect(NSRect(x: 16, y: 92, width: 374, height: 57), NSColor.white.withAlphaComponent(0.045), radius: 9)
         text(owner.selected?.title ?? owner.focusReport.title ?? "等待识别当前对话", 26, 101, 326, size: 12, weight: .medium)
@@ -169,6 +185,60 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let cardView = MonitorView(detail: true)
     var settings = Settings.load()
     var snapshot = UsageSnapshot()
+    var accountState = YonshoreAccountState()
+    var walletEnabled: Bool { settings.yonshoreEnabled ?? false }
+    private let walletQueue = DispatchQueue(label: "com.yonshore.codex-usage.wallet", qos: .utility)
+    private var readingWallet = false
+    private var walletGeneration = 0
+    private var lastWalletRead = Date.distantPast
+    func refreshWallet(force: Bool = false) {
+        guard walletEnabled, !uiTest, !readingWallet, force || Date().timeIntervalSince(lastWalletRead) >= 30 else { return }
+        readingWallet = true; accountState.loading = true; lastWalletRead = Date()
+        let generation = walletGeneration
+        walletQueue.async { [weak self] in
+            let result: Result<YonshoreWallet, YonshoreError>
+            do { result = YonshoreClient().fetch(key: try YonshoreSecret.load()) }
+            catch let error as YonshoreError { result = .failure(error) }
+            catch { result = .failure(.credential) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }; self.readingWallet = false
+                guard generation == self.walletGeneration, self.walletEnabled else { return }
+                self.accountState.accept(result); self.repaint(); self.writeWalletStatus()
+            }
+        }
+    }
+    private func writeWalletStatus() {
+        guard !uiTest else { return }
+        let status: [String: Any] = ["configured": walletEnabled, "hasWallet": accountState.wallet != nil,
+            "updatedAt": accountState.updatedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "",
+            "error": accountState.error ?? ""]
+        if let bytes = try? JSONSerialization.data(withJSONObject: status, options: [.sortedKeys]) {
+            try? bytes.write(to: Settings.directory.appendingPathComponent("yonshore-status.json"), options: .atomic)
+        }
+    }
+    func connectYonshore() {
+        guard !uiTest else { return }
+        let previous = NSWorkspace.shared.frontmostApplication
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert(); alert.messageText = "连接 YonshoreAPI"
+        alert.informativeText = "输入自己的 API Key，仅向 https://api.yonshore.com 查询余额与累计实际扣费。密钥保存在 macOS 钥匙串。只查询账户，不调用模型、不充值。金额沿用站内显示单位 $，与官方 USD 估算分开。"
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 28)); field.placeholderString = "sk-…"
+        alert.accessoryView = field; alert.addButton(withTitle: "保存并连接"); alert.addButton(withTitle: "取消")
+        alert.window.initialFirstResponder = field
+        defer { field.stringValue = ""; previous?.activate(options: []) }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try YonshoreSecret.save(field.stringValue)
+            settings.yonshoreEnabled = true; walletGeneration += 1; accountState = YonshoreAccountState()
+            settings.overview = true; lastWalletRead = .distantPast; save(); refreshWallet(force: true); showCard()
+        } catch let error as YonshoreError { let errorAlert = NSAlert(); errorAlert.messageText = error.message; errorAlert.runModal() }
+        catch { let errorAlert = NSAlert(); errorAlert.messageText = "无法保存密钥"; errorAlert.runModal() }
+    }
+    private func disconnectYonshore() {
+        settings.yonshoreEnabled = false; walletGeneration += 1; accountState = YonshoreAccountState(); save(); writeWalletStatus()
+        do { try YonshoreSecret.remove() }
+        catch { let alert = NSAlert(); alert.messageText = "已停止查询；钥匙串未允许移除密钥，请在钥匙串访问中删除 YonshoreAPI 用量浮窗条目。"; alert.runModal() }
+    }
     var allUsage = AllUsageSummary()
     var overview: Bool { settings.overview ?? true }
     var notesExpanded: Bool { settings.notesExpanded ?? false }
@@ -285,8 +355,9 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hoverTimer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
         readTimer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.main.add(hoverTimer!, forMode: .common); RunLoop.main.add(readTimer!, forMode: .common)
-        allTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.refreshAll() }
-        refreshAll()
+        allTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.refreshAll(); self?.refreshWallet() }
+        refreshAll(); refreshWallet()
+        if CommandLine.arguments.contains("--connect-yonshore"), !uiTest { DispatchQueue.main.async { [weak self] in self?.connectYonshore() } }
         tick()
         if uiTest { runUITest() }
     }
@@ -380,7 +451,7 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if pinned { showCard() } else { card.orderOut(nil) }
         repaint()
     }
-    private func cardHeight() -> CGFloat { (overview ? 350 : 375 + CGFloat(max(1, snapshot.windows.count)) * 62 - (snapshot.windows.isEmpty ? 18 : 0)) + CGFloat(settings.metrics.count) * 29 + (notesExpanded ? 90 : 0) }
+    private func cardHeight() -> CGFloat { (overview ? 350 + (walletEnabled ? 114 : 38) : 375 + CGFloat(max(1, snapshot.windows.count)) * 62 - (snapshot.windows.isEmpty ? 18 : 0)) + CGFloat(settings.metrics.count) * 29 + (notesExpanded ? 90 : 0) }
     func showCard() {
         placeCard(); if !card.isVisible { card.orderFrontRegardless() }; cardView.needsDisplay = true
     }
@@ -481,6 +552,11 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try? FileManager.default.createDirectory(at: UsageBridge.directory, withIntermediateDirectories: true)
             NSWorkspace.shared.open(UsageBridge.directory)
         })
+        menu.addItem(item(walletEnabled ? "更换 YonshoreAPI 连接…" : "连接 YonshoreAPI 余额与实扣…") { [weak self] in self?.connectYonshore() })
+        if walletEnabled {
+            menu.addItem(item("刷新 YonshoreAPI 账户") { [weak self] in self?.refreshWallet(force: true) })
+            menu.addItem(item("断开 YonshoreAPI 并移除密钥") { [weak self] in self?.disconnectYonshore() })
+        }
         let prices = NSMenuItem(title: "API 费用明细与价目", action: nil, keyEquivalent: ""); prices.submenu = NSMenu()
         for (title, value) in [("全部累计", Optional(allUsage.cost)), ("任务合计", snapshot.costTotal), ("本轮", snapshot.costRound), ("最近调用", snapshot.costLast)] {
             prices.submenu?.addItem(NSMenuItem(title: title + "：" + (value?.label ?? "—"), action: nil, keyEquivalent: ""))
@@ -558,6 +634,11 @@ final class MonitorController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             checks["live_tokens_loaded"] = snapshot.total?.input != nil
             settings.overview = true; settings.notesExpanded = false; showCard(); cardView.display()
             let collapsedHeight = card.frame.height
+            let walletWasEnabled = settings.yonshoreEnabled
+            settings.yonshoreEnabled = true; accountState.accept(.success(YonshoreWallet(available: Decimal(string: "12.34")!, spent: Decimal(string: "4.56")!)))
+            showCard(); checks["wallet_has_independent_height"] = card.frame.height == collapsedHeight + (walletWasEnabled == true ? 0 : 76)
+            cardView.display(); capture(cardView, name: "wallet.png")
+            settings.yonshoreEnabled = walletWasEnabled; accountState = YonshoreAccountState(); showCard()
             checks["overview_default_has_two_tabs"] = cardView.actions.count >= 5
             toggleNotes(); showCard(); checks["notes_expand_height"] = card.frame.height == collapsedHeight + 90
             capture(cardView, name: "all-expanded.png")

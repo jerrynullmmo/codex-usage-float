@@ -4,7 +4,7 @@ $projectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $projectRoot
 python -c "import sys,struct; assert sys.version_info[:3] == (3,13,7) and struct.calcsize('P')==8; import tkinter, PyInstaller"
 if ($LASTEXITCODE -ne 0) { throw 'Requires 64-bit Python 3.13.7, Tkinter and PyInstaller. See windows/README.md.' }
-python -m unittest discover -s windows -p test_usage.py
+python -m unittest discover -s windows -p 'test_*.py'
 if ($LASTEXITCODE -ne 0) { throw 'Accounting tests failed.' }
 $buildDirectory = Join-Path $projectRoot 'build'
 New-Item -ItemType Directory -Force $buildDirectory | Out-Null
@@ -13,7 +13,7 @@ $focus = Join-Path $buildDirectory 'FocusProbe.exe'
 & (Join-Path $framework 'csc.exe') /nologo /target:exe /optimize "/out:$focus" /reference:System.Web.Extensions.dll "/reference:$framework\WPF\UIAutomationClient.dll" "/reference:$framework\WPF\UIAutomationTypes.dll" (Join-Path $PSScriptRoot 'FocusProbe.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Window title probe build failed.' }
 Copy-Item $focus (Join-Path $PSScriptRoot 'FocusProbe.exe') -Force
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name AIUsageFloat --exclude-module ssl --exclude-module _ssl --exclude-module _hashlib --exclude-module multiprocessing --exclude-module concurrent.futures.process --distpath dist/windows --workpath build/pyinstaller --specpath build --add-data "$PSScriptRoot\prices.json;." --add-data "$focus;." --add-data "$projectRoot\LICENSE;." windows/usage_float.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name AIUsageFloat --exclude-module multiprocessing --exclude-module concurrent.futures.process --distpath dist/windows --workpath build/pyinstaller --specpath build --add-data "$PSScriptRoot\prices.json;." --add-data "$focus;." --add-data "$projectRoot\LICENSE;." windows/usage_float.py
 if ($LASTEXITCODE -ne 0) { throw 'Application build failed.' }
 $version = (Get-Content VERSION -Raw).Trim()
 $package = Join-Path $projectRoot 'build/windows-package'

@@ -3,7 +3,7 @@
 [![Build and test](https://github.com/jerrynullmmo/codex-usage-float/actions/workflows/ci.yml/badge.svg)](https://github.com/jerrynullmmo/codex-usage-float/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A native macOS floating usage monitor for AI desktops. Built-in Codex and OpenCode readers, recursive subagent accounting, and a local JSON bridge for additional applications. Hover to expand and click to pin. Automatic conversation following depends on the data source; see the compatibility table below. Runs locally without model calls or telemetry. macOS 14+ / Apple Silicon and Windows 10/11 x64. The interface and detailed documentation are currently in Chinese.
+A native macOS floating usage monitor for AI desktops. Built-in Codex and OpenCode readers, recursive subagent accounting, and a local JSON bridge for additional applications. Hover to expand and click to pin. Automatic conversation following depends on the data source; see the compatibility table below. Local usage accounting runs without model calls or telemetry; optional YonshoreAPI balance queries contact only api.yonshore.com. macOS 14+ / Apple Silicon and Windows 10/11 x64. The interface and detailed documentation are currently in Chinese.
 
 独立社区项目，与 OpenAI 或其他软件厂商无官方隶属关系。仓库、应用文件名和设置路径保留 `Codex Usage Float`，便于旧版本升级。源码和工具脚本采用 [MIT 许可证](LICENSE)。
 
@@ -17,6 +17,16 @@ A native macOS floating usage monitor for AI desktops. Built-in Codex and OpenCo
 
 范围是**这台电脑上已接入且仍可读取的记录**，不是账号全设备账单。不含未同步电脑、已删除日志，也不代表尚未接通的软件已支持。通用接入只能统计接入文件导出的历史。不同软件记录同一次调用、或分叉复制原对话历史时，原始记录可能重叠：当前按各自会话口径累计，不能将此视为去重后的实际消费账单。缺失记录或模型价格时显示已知部分并附 `+ ?`；未知单项显示 `—`，不会用零补齐。套餐百分比属于账户快照，不对多个对话求和。
 
+## YonshoreAPI 余额与实际扣费
+
+在“全部累计”中点击 **连接 YonshoreAPI**，或从设置进入，输入自己的有效 API Key。只向 `https://api.yonshore.com` 发起账户查询，不调用模型、不充值、不改余额。Mac 将密钥保存在系统钥匙串，Windows 保存在系统凭据管理器；密钥不会写入偏好文件、诊断文件、版本库或发送到其他服务。关闭对话框不会替换原连接，设置中可以更换或断开并删除密钥。
+
+连接后每约 30 秒查询 **可用余额** 与 **账户累计实际扣费**，并可手动刷新。这是该 Key 所属整个账户的账本数据，包含账户在其他软件、设备的调用，不等于单独这把 Key 或当前对话的消费；不能再按对话或子代理重复相加。实际扣费遵循服务端的已结算、冲正口径，不通过余额变化猜测。
+
+接口使用 `GET /v1/dashboard/billing/subscription` 与 `GET /v1/dashboard/billing/usage`。按 YonshoreAPI 当前部署契约，`hard_limit_usd` 是“可用额度 + 累计消费”的站内显示值，`total_usage` 是累计消费的百分之一单位；可用余额由两者相减取得，已扣除服务端占用。读取前后会核对累计消费，发现并发结算则重读，无法取得一致值就显示错误。**字段名中的 USD 不代表这里做了美元换算**：浮窗沿用 YonshoreAPI 站内 `$` 显示单位；它与“官方 API 估算 USD”分开，不相加。
+
+未连接、密钥无效/过期/耗尽、权限或 IP 限制、网络错误都会明确显示。失败时若保留上次成功金额，会标记为旧结果；更换或断开连接立即清空旧账户数据。查询不带日期筛选，当前只显示账户累计实扣，不冒充今日、本月或逐对话账单。接口仅验证持有该账户的有效 Key，不自动读取其他软件的密钥。
+
 ## 官方 API 费用估算
 
 详情增加“API 估算 USD”一行，分别显示任务合计、本轮、主任务最近调用；设置菜单可查看缺失原因、涉及模型、价目来源，并将费用放到紧凑浮标中。子代理先按各自调用的模型计算，再合并金额。模型切换不会把旧调用重新归到最新模型。
@@ -27,7 +37,7 @@ A native macOS floating usage monitor for AI desktops. Built-in Codex and OpenCo
 
 输入拆分为普通输入、缓存读取、缓存写入三类，各自只计一次。长上下文模型按每次调用的输入长度选档，不能按任务累计 Token 选档。记录缺少模型、价格或计费字段时，`—` 表示无法估算，`$金额 + ?` 表示已核实部分，不能视作完整合计；小于 $0.0001 的正金额显示 `<$0.0001`。
 
-Codex 费用按每次累计增量与最近调用明细交叉核对，历史在后台每次最多回溯 8 MB，回溯完成才提供该任务金额。OpenCode 按独立消息计算。通用接入程序需提供逐次调用及完整性声明，见 [接入格式](docs/ADAPTERS.md)。不会请求模型或上传对话来计算费用。
+Codex 费用按每次累计增量与最近调用明细交叉核对，历史在后台每次最多回溯 8 MB，回溯完成才提供该任务金额。OpenCode 按独立消息计算。通用接入程序需提供逐次调用及完整性声明，见 [接入格式](docs/ADAPTERS.md)。不会请求模型或上传对话来计算费用。余额与实际扣费查询是用户主动连接后单独启用的联网功能。
 
 ## 软件兼容现状
 
@@ -80,6 +90,10 @@ open -g "$HOME/Applications/Codex Usage Float.app"
 
 临时签名随重新构建而变化。更新后即使开关仍亮着，旧授权也可能不再适用于新版本；请在辅助功能列表移除旧条目，再通过“+”添加 `~/Applications/Codex Usage Float.app` 并开启。浮窗会自动重试，不需要重启 Codex。只想手动选择任务时，可以不授予此权限。
 
+本机从源码更新时，可先运行 `python3 scripts/setup-local-signing.py`，建立固定的个人签名。私钥仅存于登录钥匙串，系统可能要求本人输入 Mac 密码允许 `codesign` 使用该私钥。脚本不添加受信任根证书，不改辅助功能数据库。之后 `zsh build.sh` 自动复用该身份；证书不可用时停止构建，不静默退回临时签名。第一次从临时签名切换过去仍需重新授权，后续保持签名与安装路径一致即可沿用身份；系统重置授权、删除证书或更换身份等情况仍可能需要重新授权。安装脚本会阻止已有固定签名被另一身份覆盖。
+
+个人签名仅用于这台 Mac 的本地构建，不放进公开安装包。公开发行的稳定签名需维护者提供 Apple Developer ID；当前公开包仍是临时签名。可用 `USAGE_SIGNING_IDENTITY='Developer ID Application: …' zsh build.sh` 指定已有证书；使用 `USAGE_SIGNING_IDENTITY=- zsh build.sh` 明确生成公开临时签名包，但不要用它覆盖自己的固定签名安装。身份识别原理见 [Apple 代码签名说明](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html)。
+
 ## macOS 使用
 
 - 打开 `~/Applications/Codex Usage Float.app`。默认只在已接入的软件位于前台时显示。
@@ -112,7 +126,7 @@ Token 是模型处理文字等内容时使用的计量单位，不等于中文�
 
 ## macOS 数据与权限
 
-使用 macOS 原生 AppKit 窗口，不修改、注入或重新签名 Codex。只读 `~/.codex/state_*.sqlite` 的任务索引、父子关系与对应日志，以及 `~/.local/share/opencode/opencode.db` 中的任务和消息计量字段；通过接入目录读取用户主动配置的 JSON 用量快照；不读取登录凭据，不连接网络，不调用模型，不上传内容。自动跟随使用 macOS 辅助功能接口，只读取 Codex 当前窗口的应用页面标题或 OpenCode 的窗口标题，找到页面后不遍历对话正文，也不读取嵌入浏览器网页。其他软件的通用接入使用接入程序明确提供的当前任务编号，不需要辅助功能权限。代码不通过该权限点击或输入其他应用，不需要录屏或自动化权限；手动模式不需要辅助功能权限。
+使用 macOS 原生 AppKit 窗口，不修改、注入或重新签名 Codex。只读 `~/.codex/state_*.sqlite` 的任务索引、父子关系与对应日志，以及 `~/.local/share/opencode/opencode.db` 中的任务和消息计量字段；通过接入目录读取用户主动配置的 JSON 用量快照。上述本地统计不读取登录凭据、不连接网络、不调用模型、不上传内容。只有主动连接 YonshoreAPI 后，才使用用户为浮窗配置的 Key 查询账户余额和实扣。自动跟随使用 macOS 辅助功能接口，只读取 Codex 当前窗口的应用页面标题或 OpenCode 的窗口标题，找到页面后不遍历对话正文，也不读取嵌入浏览器网页。其他软件的通用接入使用接入程序明确提供的当前任务编号，不需要辅助功能权限。代码不通过该权限点击或输入其他应用，不需要录屏或自动化权限；手动模式不需要辅助功能权限。
 
 当前匹配依据是对话标题，而不是 Codex 官方提供的当前任务 ID 接口。支持可唯一匹配到本机记录的对话；不支持自动读取远程或云端用量。远程对话与本地任务同名时，仅凭标题无法区分，应暂停自动跟随。Codex 更换标题规则、页面地址或窗口结构后可能需要适配。
 
